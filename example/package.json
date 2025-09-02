@@ -17,8 +17,14 @@
     "prepare": "cd .. && npm i && npm run build && cd example"
   },
   "dependencies": {
+    "@atomicfinance/bitcoin-js-wallet-provider": "^4.1.9",
+    "@atomicfinance/provider": "^4.1.9",
+    "@atomicfinance/types": "^4.1.9",
     "@mantine/core": "^8.2.1",
     "@mantine/hooks": "^8.2.1",
+    "@node-dlc/bufio": "^1.1.0",
+    "@node-dlc/core": "^1.1.0",
+    "@node-dlc/messaging": "^1.1.0",
     "@stacks/common": "^7.0.2",
     "@stacks/encryption": "7.0.5",
     "@stacks/stacking": "^7.0.2",
@@ -27,6 +33,7 @@
     "@tanstack/react-query": "^5.50.1",
     "bip322-js": "^2.0.0",
     "bitcoinjs-message": "^2.2.0",
+    "crypto-browserify": "^3.12.1",
     "eslint-plugin-react": "^7.34.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

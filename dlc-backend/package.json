@@ -1,0 +1,43 @@
+{
+  "name": "dlc-backend",
+  "version": "1.0.0",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@atomicfinance/bitcoin-cfd-provider": "^4.1.9",
+    "@atomicfinance/bitcoin-ddk-provider": "^4.1.9",
+    "@atomicfinance/bitcoin-esplora-api-provider": "^4.1.9",
+    "@atomicfinance/bitcoin-js-wallet-provider": "^4.1.9",
+    "@atomicfinance/bitcoin-rpc-provider": "^4.1.9",
+    "@atomicfinance/client": "^4.1.9",
+    "@atomicfinance/provider": "^4.1.9",
+    "@atomicfinance/types": "^4.1.9",
+    "@atomicfinance/utils": "^4.1.9",
+    "@bennyblader/ddk-ts": "^0.3.26",
+    "@node-dlc/messaging": "^1.1.0",
+    "axios": "^1.11.0",
+    "bip39": "^3.1.0",
+    "bitcoin-network": "^0.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.13.5",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
