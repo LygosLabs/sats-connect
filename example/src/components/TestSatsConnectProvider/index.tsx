@@ -179,10 +179,11 @@ export function TestSatsConnectProvider() {
                     key={index}
                     style={{
                       marginTop: '0.5rem',
-                      padding: '0.5rem',
-                      backgroundColor: '#f5f5f5',
+                      padding: '0.75rem',
+                      backgroundColor: '#2a2a2a',
                       borderRadius: '4px',
-                      fontSize: '0.8em',
+                      fontSize: '0.85em',
+                      color: '#ffffff',
                     }}
                   >
                     <div>
@@ -223,10 +224,11 @@ export function TestSatsConnectProvider() {
                       <div
                         style={{
                           marginTop: '0.5rem',
-                          padding: '0.5rem',
-                          backgroundColor: '#f8f9fa',
+                          padding: '0.75rem',
+                          backgroundColor: '#2a2a2a',
                           borderRadius: '4px',
-                          fontSize: '0.8em',
+                          fontSize: '0.85em',
+                          color: '#ffffff',
                         }}
                       >
                         <div>
@@ -265,10 +267,11 @@ export function TestSatsConnectProvider() {
                         <div
                           style={{
                             marginTop: '0.5rem',
-                            padding: '0.5rem',
-                            backgroundColor: '#e8f5e8',
+                            padding: '0.75rem',
+                            backgroundColor: '#2a2a2a',
                             borderRadius: '4px',
-                            fontSize: '0.8em',
+                            fontSize: '0.85em',
+                            color: '#ffffff',
                           }}
                         >
                           <div>
@@ -311,10 +314,11 @@ export function TestSatsConnectProvider() {
                         <div
                           style={{
                             marginTop: '0.5rem',
-                            padding: '0.5rem',
-                            backgroundColor: '#d1ecf1',
+                            padding: '0.75rem',
+                            backgroundColor: '#2a2a2a',
                             borderRadius: '4px',
-                            fontSize: '0.8em',
+                            fontSize: '0.85em',
+                            color: '#ffffff',
                           }}
                         >
                           <div>
@@ -338,10 +342,11 @@ export function TestSatsConnectProvider() {
                       <div
                         style={{
                           marginTop: '0.5rem',
-                          padding: '0.5rem',
-                          backgroundColor: '#fff3cd',
+                          padding: '0.75rem',
+                          backgroundColor: '#2a2a2a',
                           borderRadius: '4px',
-                          fontSize: '0.8em',
+                          fontSize: '0.85em',
+                          color: '#ffffff',
                         }}
                       >
                         <div>
