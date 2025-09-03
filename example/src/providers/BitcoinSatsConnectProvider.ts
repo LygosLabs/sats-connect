@@ -77,6 +77,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const response = await this.wallet.request('getAddresses', {
         purposes: [AddressPurpose.Payment, AddressPurpose.Ordinals],
       });
+      console.log('response', response);
 
       if (response.status === 'error') {
         throw new Error(`SatsConnect error: ${response.error?.message || 'Unknown error'}`);

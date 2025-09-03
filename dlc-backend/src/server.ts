@@ -1,4 +1,5 @@
 import BitcoinDdkProvider from '@atomicfinance/bitcoin-ddk-provider';
+import { BitcoinEsploraApiProvider } from '@atomicfinance/bitcoin-esplora-api-provider';
 import { BitcoinJsWalletProvider } from '@atomicfinance/bitcoin-js-wallet-provider';
 import { Client } from '@atomicfinance/client';
 import { bitcoin, Input } from '@atomicfinance/types';
@@ -23,15 +24,22 @@ const network = BitcoinNetworks.bitcoin_testnet;
 const bitcoinWithDdk = new Client();
 
 // Add Blockstream API provider
-const blockstreamProvider = new BlockstreamApiProvider({
-  network,
-  clientId: process.env.BLOCKSTREAM_CLIENT_ID,
-  clientSecret: process.env.BLOCKSTREAM_CLIENT_SECRET,
-  numberOfBlockConfirmation: 1,
-  defaultFeePerByte: 3,
-});
+// const blockstreamProvider = new BlockstreamApiProvider({
+//   network,
+//   clientId: process.env.BLOCKSTREAM_CLIENT_ID,
+//   clientSecret: process.env.BLOCKSTREAM_CLIENT_SECRET,
+//   numberOfBlockConfirmation: 1,
+//   defaultFeePerByte: 3,
+// });
 
-bitcoinWithDdk.addProvider(blockstreamProvider);
+// bitcoinWithDdk.addProvider(blockstreamProvider);
+
+const esploraProvider = new BitcoinEsploraApiProvider({
+  url: 'https://mempool.space/testnet/api',
+  network,
+}) as any;
+
+bitcoinWithDdk.addProvider(esploraProvider);
 
 const mnemonic = process.env.MNEMONIC || generateMnemonic(256);
 
