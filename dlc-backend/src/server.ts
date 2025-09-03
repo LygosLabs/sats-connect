@@ -86,9 +86,15 @@ app.post('/api/dlc/accept', async (req, res) => {
     // Deserialize the DLC offer
     const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
 
-    const usedAddresses = await bitcoinWithDdk.getMethod('getUsedAddresses')();
+    // Get first address without scanning all addresses
+    const addresses = await bitcoinWithDdk.getMethod('getAddresses')(0, 1);
+    if (!addresses || addresses.length === 0) {
+      return res.status(500).json({ error: 'No wallet addresses available' });
+    }
+
+    const firstAddress = addresses[0];
     const unspentTransactions = await bitcoinWithDdk.getMethod('getUnspentTransactions')([
-      usedAddresses[0].address,
+      firstAddress.address,
     ]);
 
     // Convert UTXOs to Input format for DDK
@@ -99,7 +105,7 @@ app.post('/api/dlc/accept', async (req, res) => {
         utxo.address,
         utxo.value / 1e8, // amount in BTC
         utxo.value, // value in sats
-        usedAddresses[0].derivationPath,
+        firstAddress.derivationPath,
         108
       );
     });

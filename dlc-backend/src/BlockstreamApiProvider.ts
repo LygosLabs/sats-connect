@@ -204,7 +204,7 @@ export default class BlockstreamApiProvider extends Provider {
   }
 
   async getUnspentTransactions(_addresses: (Address | string)[]): Promise<bitcoin.UTXO[]> {
-    const addresses = _addresses.map(addressToString);
+    const addresses = [_addresses.map(addressToString)[0]];
     const utxoSets = await Promise.all(
       addresses.map(async (address) => {
         const data = await this.nodeGet(`/address/${address}/utxo`);
@@ -222,7 +222,7 @@ export default class BlockstreamApiProvider extends Provider {
   async getAddressTransactionCounts(
     _addresses: (Address | string)[]
   ): Promise<{ [address: string]: number }> {
-    const addresses = _addresses.map(addressToString);
+    const addresses = [_addresses.map(addressToString)[0]];
     const transactionCounts: { [address: string]: number } = {};
 
     await Promise.all(
