@@ -60,6 +60,7 @@ export default class BlockstreamApiProvider extends Provider {
     // Create axios instance with interceptor for authentication
     this.axiosInstance = axios.create({
       baseURL: baseUrl,
+      timeout: 60000,
     });
 
     // Add request interceptor to handle authentication (only if credentials provided)
