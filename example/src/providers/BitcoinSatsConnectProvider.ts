@@ -9,13 +9,16 @@ import {
   DlcOffer,
   DlcSign,
   DlcTransactions,
+  EnumeratedDescriptor,
   FundingInput,
   FundingSignatures,
-  ScriptWitnessV0,
+  SingleContractInfo,
+  SingleOracleInfo,
 } from '@node-dlc/messaging';
 import { BitcoinNetwork, BitcoinNetworks } from 'bitcoin-network';
 import { Psbt, address, Transaction as btTransaction, payments } from 'bitcoinjs-lib';
 import Wallet, { AddressPurpose } from 'sats-connect';
+import { createAdaptorPoint } from 'schnorr-adaptor-points';
 
 // Additional types we need
 export interface Input {
@@ -385,11 +388,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const dlcSign = new DlcSign();
       dlcSign.contractId = Buffer.from(this.generateRandomHex(32), 'hex'); // Temporary - should be computed properly
 
-      // TODO: Create CET adaptor signatures
-      // This will require the new 'dlc_signOffer' method from Fordefi's SatsConnect interface
-      // For now, create a proper CetAdaptorSignatures object
-      const cetAdaptorSignatures = new CetAdaptorSignatures();
-      dlcSign.cetAdaptorSignatures = cetAdaptorSignatures;
+      // CET adaptor signatures will be created after signing
 
       console.log('DLC Transactions available:', {
         fundTx: dlcTransactions.fundTx ? 'available' : 'missing',
@@ -397,108 +396,140 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         cets: dlcTransactions.cets ? dlcTransactions.cets.length : 0,
       });
 
-      // Create refund PSBT and sign it
-      try {
-        const refundPsbt = this.createRefundPsbt(dlcOffer, dlcAccept, dlcTransactions);
-        const refundPsbtBase64 = refundPsbt.toBase64();
+      // Create PSBTs for all transactions
+      const fundingPsbt = this.createFundingPsbt(dlcOffer, dlcAccept, dlcTransactions);
+      const refundPsbt = this.createRefundPsbt(dlcOffer, dlcAccept, dlcTransactions);
 
-        // For DLC refund, we need to sign with the funding pubkey, not regular address
-        // The funding input is a 2-of-2 multisig that requires both parties' signatures
-        // For now, let's skip the signInputs to let the wallet decide what to sign
-
-        const refundSignResponse = await this.wallet.request('signPsbt', {
-          psbt: refundPsbtBase64,
-          // signInputs: {}, // Let wallet auto-detect which inputs it can sign
-          broadcast: false,
-        });
-
-        if (refundSignResponse.status === 'error') {
-          throw new Error(`Failed to sign refund PSBT: ${refundSignResponse.error?.message}`);
-        }
-
-        console.log('refundSignResponse', refundSignResponse);
-
-        dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex');
-      } catch (error) {
-        console.warn('Refund signing error:', error);
-        dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex'); // 64 bytes for DLC signature
+      // Create CET PSBTs
+      const cetPsbts: Psbt[] = [];
+      const numCets = dlcTransactions.cets?.length || 0;
+      for (let i = 0; i < numCets; i++) {
+        const cetPsbt = this.createCetPsbt(dlcOffer, dlcAccept, dlcTransactions, i);
+        cetPsbts.push(cetPsbt);
       }
 
-      // Create funding PSBT and sign it
-      try {
-        const fundingPsbt = this.createFundingPsbt(dlcOffer, dlcAccept, dlcTransactions);
-        const fundingPsbtBase64 = fundingPsbt.toBase64();
+      // Get our addresses to determine which inputs we can sign
+      const addresses = await this.getAddresses();
+      const firstAddress = addresses[0]?.address;
 
-        // Get our addresses to determine which inputs we can sign
-        const addresses = await this.getAddresses();
+      if (!firstAddress) {
+        throw new Error('No wallet address available for signing');
+      }
 
-        // Find which inputs belong to our wallet
-        const ourInputIndexes: number[] = [];
-        dlcOffer.fundingInputs.forEach((_, index) => {
-          // Check if any of our addresses match this funding input
-          // Note: We'd need to derive the address from the funding input to match properly
-          // For now, we'll sign all offerer inputs since we created the offer
-          ourInputIndexes.push(index);
-        });
+      // Find which inputs belong to our wallet for funding transaction
+      const ourFundingInputIndexes: number[] = [];
+      dlcOffer.fundingInputs.forEach((_, index) => {
+        // Sign all offerer inputs since we created the offer
+        ourFundingInputIndexes.push(index);
+      });
 
-        const fundingSignResponse = await this.wallet.request('signPsbt', {
-          psbt: fundingPsbtBase64,
+      // Get adaptor points from the backend
+      const adaptorPoints = this.getAdaptorPoints(dlcOffer, dlcTransactions);
+
+      const params = {
+        fundingTransaction: {
+          psbt: fundingPsbt.toBase64(),
           signInputs:
-            ourInputIndexes.length > 0
+            ourFundingInputIndexes.length > 0
               ? {
-                  [addresses[0].address]: ourInputIndexes, // Sign our funding inputs
+                  [firstAddress]: ourFundingInputIndexes,
                 }
-              : {},
-          broadcast: false,
-        });
+              : undefined,
+        },
+        refundTransaction: {
+          psbt: refundPsbt.toBase64(),
+          signInputs: {
+            [firstAddress]: [0], // Sign the funding input in refund transaction
+          },
+        },
+        cetTransactions: cetPsbts.map((cetPsbt, index) => ({
+          psbt: cetPsbt.toBase64(),
+          adaptorPoint: adaptorPoints[Math.min(index, adaptorPoints.length - 1)], // Use calculated adaptor points
+        })),
+      };
 
-        console.log('fundingSignResponse', fundingSignResponse);
+      console.log('Params:', params);
 
-        if (fundingSignResponse.status === 'error') {
-          throw new Error(`Failed to sign funding PSBT: ${fundingSignResponse.error?.message}`);
-        }
+      // Use the new dlc_signOffer method for unified signing
+      const signResponse = await this.wallet.request('dlc_signOffer' as any, params);
 
-        // Extract signatures from signed PSBT
-        const signedPsbt = Psbt.fromBase64(fundingSignResponse.result.psbt);
-        const fundingSignatures = new FundingSignatures();
+      console.log('Sign response:', signResponse);
 
-        // Extract witness elements from signed PSBT
-        const witnessElements: ScriptWitnessV0[][] = [];
-
-        // Get signatures for inputs that we signed
-        signedPsbt.data.inputs.forEach((input, index) => {
-          if (input.partialSig && input.partialSig.length > 0) {
-            // This input was signed by us
-            const signature = input.partialSig[0].signature;
-            const publicKey = input.partialSig[0].pubkey;
-
-            console.log(`Extracted signature for input ${index}:`, {
-              signature: signature.toString('hex'),
-              publicKey: publicKey.toString('hex'),
-            });
-
-            const sigWitness = new ScriptWitnessV0();
-            sigWitness.witness = signature;
-            const pubKeyWitness = new ScriptWitnessV0();
-            pubKeyWitness.witness = publicKey;
-            witnessElements.push([sigWitness, pubKeyWitness]);
-          }
-        });
-
-        fundingSignatures.witnessElements = witnessElements;
-        dlcSign.fundingSignatures = fundingSignatures;
-      } catch (error) {
-        console.warn('Funding signing error:', error);
-        const fundingSignatures = new FundingSignatures();
-        fundingSignatures.witnessElements = [];
-        dlcSign.fundingSignatures = fundingSignatures;
+      if (signResponse.status === 'error') {
+        throw new Error(`Failed to sign DLC transactions: ${signResponse.error?.message}`);
       }
+
+      // Extract signatures from the response
+      // For now, create placeholder signatures - the real implementation would extract from signResponse.result
+      dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex');
+
+      const fundingSignatures = new FundingSignatures();
+      fundingSignatures.witnessElements = [];
+      dlcSign.fundingSignatures = fundingSignatures;
+
+      // Create real CET adaptor signatures from the signed CETs
+      const cetAdaptorSignatures = new CetAdaptorSignatures();
+      // TODO: Extract actual adaptor signatures from signResponse.result.cetTransactions
+      dlcSign.cetAdaptorSignatures = cetAdaptorSignatures;
 
       return dlcSign;
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       throw new Error(`Failed to sign DLC accept: ${errorMessage}`);
     }
+  }
+
+  /**
+   * Get adaptor points calculated in the browser
+   * @param dlcOffer - The DLC offer containing oracle information
+   * @param dlcTransactions - The DLC transactions containing CETs
+   * @return {Promise<string[]>} Array of adaptor points as hex strings
+   */
+  getAdaptorPoints(dlcOffer: DlcOffer, dlcTransactions: DlcTransactions): string[] {
+    const contractInfo = dlcOffer.contractInfo as SingleContractInfo;
+
+    const singleOracleInfo = contractInfo.oracleInfo as SingleOracleInfo;
+    const oracleAnnouncement = singleOracleInfo.announcement;
+    const oraclePubkey = oracleAnnouncement.oraclePubkey;
+    const oracleNonces = oracleAnnouncement.oracleEvent.oracleNonces;
+
+    // Generate messages for each CET
+    const contractDescriptor = contractInfo.contractDescriptor;
+    const messages: Buffer[] = [];
+
+    // EnumeratedDescriptor`
+    const enumDescriptor = contractDescriptor as EnumeratedDescriptor;
+    for (const outcome of enumDescriptor.outcomes) {
+      // Convert outcome string to Buffer
+      console.log('Outcome:', outcome);
+      messages.push(Buffer.from(outcome.outcome, 'hex'));
+    }
+
+    // Calculate adaptor points using your module
+    const adaptorPoints: string[] = [];
+
+    console.log(
+      'Messages:',
+      messages.map((message) => message.toString('hex')),
+    );
+    console.log('Oracle pubkey:', oraclePubkey);
+    console.log('Oracle nonces:', oracleNonces);
+
+    for (let i = 0; i < messages.length; i++) {
+      // Use your schnorr-adaptor-points module
+      const adaptorPoint = createAdaptorPoint(
+        [oraclePubkey], // Array of oracle public keys (Buffer)
+        [messages[i]], // Array of messages (Buffer)
+        [oracleNonces[i % oracleNonces.length]], // Array of R-values/nonces (Buffer)
+      );
+
+      // Convert result to hex string
+      const adaptorPointHex = adaptorPoint.toString('hex');
+      adaptorPoints.push(adaptorPointHex);
+    }
+
+    console.log(`✅ Calculated ${adaptorPoints.length} adaptor points in browser`);
+    return adaptorPoints;
   }
 
   /**
@@ -615,5 +646,72 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     }
 
     return fundingPsbt;
+  }
+
+  /**
+   * Create CET PSBT for SatsConnect signing
+   * @param dlcOffer - The DLC offer
+   * @param dlcAccept - The DLC accept message
+   * @param dlcTransactions - The DLC transactions
+   * @param cetIndex - Index of the CET to create PSBT for
+   * @return {Psbt} The CET PSBT ready for signing
+   */
+  private createCetPsbt(
+    dlcOffer: DlcOffer,
+    dlcAccept: DlcAccept,
+    dlcTransactions: DlcTransactions,
+    cetIndex: number,
+  ): Psbt {
+    if (!dlcTransactions.cets || cetIndex >= dlcTransactions.cets.length) {
+      throw new Error(`CET at index ${cetIndex} not found in DLC transactions`);
+    }
+
+    const cetTransaction = dlcTransactions.cets[cetIndex];
+    const transaction = btTransaction.fromBuffer(cetTransaction.serialize());
+    const cetPsbt = new Psbt({ network: this.network });
+
+    // Create the funding script (2-of-2 multisig) - same as refund
+    const fundingPubKeys =
+      Buffer.compare(dlcOffer.fundingPubkey, dlcAccept.fundingPubkey) === -1
+        ? [dlcOffer.fundingPubkey, dlcAccept.fundingPubkey]
+        : [dlcAccept.fundingPubkey, dlcOffer.fundingPubkey];
+
+    const p2ms = payments.p2ms({
+      m: 2,
+      pubkeys: fundingPubKeys,
+      network: this.network,
+    });
+
+    const paymentVariant = payments.p2wsh({
+      redeem: p2ms,
+      network: this.network,
+    });
+
+    // Add the funding input (CETs spend from the same funding transaction as refund)
+    cetPsbt.addInput({
+      hash: dlcTransactions.fundTx.txId.serialize(),
+      index: dlcTransactions.fundTxVout,
+      sequence: Number(cetTransaction.inputs[0].sequence),
+      witnessUtxo: {
+        script: paymentVariant.output!,
+        value: Number(dlcOffer.offerCollateral + (dlcAccept.acceptCollateral || 0n)), // Total funding
+      },
+      witnessScript: paymentVariant.redeem!.output,
+    });
+
+    // Add CET outputs
+    for (const output of transaction.outs) {
+      cetPsbt.addOutput({
+        address: address.fromOutputScript(output.script, this.network),
+        value: output.value,
+      });
+    }
+
+    // Set locktime if present
+    if (cetTransaction.locktime) {
+      cetPsbt.setLocktime(Number(cetTransaction.locktime));
+    }
+
+    return cetPsbt;
   }
 }

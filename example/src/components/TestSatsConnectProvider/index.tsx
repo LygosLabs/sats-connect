@@ -56,6 +56,8 @@ export function TestSatsConnectProvider() {
           Math.floor(Date.now() / 1000) + 86400, // Refund locktime: 24 hours from now
         );
 
+        console.log('DLC offer:', dlcOffer);
+
         // Step 2: Send DLC offer to backend for acceptance using DDK
         const backendResponse = await fetch('http://localhost:3001/api/dlc/accept', {
           method: 'POST',

@@ -34,6 +34,7 @@ import { SendStx } from './components/stacks/SendStx';
 import { SignMessageStacks } from './components/stacks/signMessageStacks';
 import { SignTransaction } from './components/stacks/SignTransaction.tsx';
 import { SignTransactions } from './components/stacks/SignTransactions/index.tsx';
+import { TestAdaptorPoints } from './components/TestAdaptorPoints';
 import { TestSatsConnectProvider } from './components/TestSatsConnectProvider';
 import TransferRunes from './components/transferRunes/index.tsx';
 import { AddNetwork } from './components/wallet/AddNetwork.tsx';
@@ -210,6 +211,7 @@ const BitcoinMethods = () => {
         onDisconnect={disconnect}
       />
       <TestSatsConnectProvider />
+      <TestAdaptorPoints />
       <GetInfo />
       <SignMessage addresses={[...btcAddressInfo]} />
       <SendBtc network={network} />

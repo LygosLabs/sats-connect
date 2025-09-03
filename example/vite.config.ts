@@ -7,7 +7,21 @@ export default defineConfig({
   plugins: [
     react(),
     nodePolyfills({
-      include: ['buffer', 'stream', 'crypto'],
+      include: ['buffer', 'stream', 'crypto', 'util', 'assert', 'process', 'events'],
+      globals: {
+        Buffer: true,
+        global: true,
+        process: true,
+      },
     }),
   ],
+  define: {
+    global: 'globalThis',
+  },
+  resolve: {
+    alias: {
+      // Ensure safe-buffer uses the polyfilled Buffer
+      'safe-buffer': 'buffer',
+    },
+  },
 });

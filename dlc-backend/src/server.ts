@@ -57,9 +57,9 @@ bitcoinWithDdk.addProvider(
 bitcoinWithDdk.addProvider(new BitcoinDdkProvider(network, ddkJs));
 
 console.log(`🌐 Network: ${network.name}`);
-console.log(
-  `🔐 Blockstream Auth: ${blockstreamProvider.isAuthenticationConfigured() ? 'ENABLED' : 'DISABLED'}`
-);
+// console.log(
+//   `🔐 Blockstream Auth: ${blockstreamProvider.isAuthenticationConfigured() ? 'ENABLED' : 'DISABLED'}`
+// );
 console.log(`💰 Wallet mnemonic: ${process.env.MNEMONIC ? 'PROVIDED' : 'GENERATED'}`);
 
 // Middleware
@@ -224,6 +224,60 @@ app.get('/api/dlc/:contractId', (req, res) => {
     console.error('Error getting DLC state:', error);
     res.status(500).json({
       error: 'Failed to get DLC state',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Calculate adaptor points for DLC CET signing
+ * POST /api/adaptor-points
+ * Body: { oraclePubkey: string, oracleNonces: string[], messages: string[] }
+ * Returns: { adaptorPoints: string[] }
+ */
+app.post('/api/adaptor-points', async (req, res) => {
+  try {
+    const { oraclePubkey, oracleNonces, messages } = req.body;
+
+    if (!oraclePubkey || !oracleNonces || !messages) {
+      return res.status(400).json({
+        error: 'oraclePubkey, oracleNonces, and messages are required',
+      });
+    }
+
+    if (oracleNonces.length !== messages.length) {
+      return res.status(400).json({
+        error: 'oracleNonces and messages arrays must have the same length',
+      });
+    }
+
+    // TODO: Import and use your schnorr-adaptor-points module here
+    // const { createAdaptorPoint } = require('schnorr-adaptor-points');
+
+    const adaptorPoints = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      // For now, return placeholder adaptor points
+      // In real implementation, use your createAdaptorPoint function:
+      // const adaptorPoint = createAdaptorPoint([oraclePubkey], [messages[i]], [oracleNonces[i]]);
+
+      // Placeholder 32-byte adaptor point (in real implementation, use actual calculation)
+      const placeholderPoint = Buffer.from(
+        `${'0'.repeat(62)}${i.toString(16).padStart(2, '0')}`,
+        'hex'
+      ).toString('hex');
+
+      adaptorPoints.push(placeholderPoint);
+    }
+
+    res.json({
+      adaptorPoints,
+      success: true,
+    });
+  } catch (error: any) {
+    console.error('Error calculating adaptor points:', error);
+    res.status(500).json({
+      error: 'Failed to calculate adaptor points',
       details: error.message,
     });
   }
