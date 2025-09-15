@@ -220,7 +220,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         return fundingInput;
       });
 
-      dlcOffer.changeSpk = Buffer.from(this.addressToScriptPubKey(ordinalsAddress.address), 'hex');
+      dlcOffer.changeSpk = Buffer.from(this.addressToScriptPubKey(paymentAddress.address), 'hex');
       dlcOffer.changeSerialId = this.generateSerialId();
       dlcOffer.fundOutputSerialId = this.generateSerialId();
       dlcOffer.feeRatePerVb = feeRatePerVb;
@@ -400,12 +400,82 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const fundingPsbt = this.createFundingPsbt(dlcOffer, dlcAccept, dlcTransactions);
       const refundPsbt = this.createRefundPsbt(dlcOffer, dlcAccept, dlcTransactions);
 
+      // Debug: Check PSBT fees by manually calculating input/output difference
+      console.log('🔍 PSBT Fee Debug:');
+
+      console.log('dlcTransactions.fundTx', dlcTransactions.fundTx.toHex());
+      console.log('dlcTransactions.refundTx', dlcTransactions.refundTx.toHex());
+      console.log(
+        'dlcTransactions.cets',
+        dlcTransactions.cets.map((cet) => cet.toHex()),
+      );
+
+      // Calculate funding PSBT fee manually
+      const fundingPsbtDeserialized = Psbt.fromBase64(fundingPsbt.toBase64());
+      let fundingInputTotal = 0;
+      let fundingOutputTotal = 0;
+
+      fundingPsbtDeserialized.data.inputs.forEach((input, index) => {
+        if (input.witnessUtxo) {
+          fundingInputTotal += input.witnessUtxo.value;
+        }
+      });
+
+      fundingPsbtDeserialized.txOutputs.forEach((output) => {
+        fundingOutputTotal += output.value;
+      });
+
+      const fundingFee = fundingInputTotal - fundingOutputTotal;
+      console.log(
+        `Funding PSBT fee: ${fundingFee} sats (inputs: ${fundingInputTotal}, outputs: ${fundingOutputTotal})`,
+      );
+
+      // Calculate refund PSBT fee manually
+      const refundPsbtDeserialized = Psbt.fromBase64(refundPsbt.toBase64());
+      let refundInputTotal = 0;
+      let refundOutputTotal = 0;
+
+      refundPsbtDeserialized.data.inputs.forEach((input, index) => {
+        if (input.witnessUtxo) {
+          refundInputTotal += input.witnessUtxo.value;
+        }
+      });
+
+      refundPsbtDeserialized.txOutputs.forEach((output) => {
+        refundOutputTotal += output.value;
+      });
+
+      const refundFee = refundInputTotal - refundOutputTotal;
+      console.log(
+        `Refund PSBT fee: ${refundFee} sats (inputs: ${refundInputTotal}, outputs: ${refundOutputTotal})`,
+      );
+
       // Create CET PSBTs
       const cetPsbts: Psbt[] = [];
       const numCets = dlcTransactions.cets?.length || 0;
       for (let i = 0; i < numCets; i++) {
         const cetPsbt = this.createCetPsbt(dlcOffer, dlcAccept, dlcTransactions, i);
         cetPsbts.push(cetPsbt);
+
+        // Calculate CET PSBT fee manually
+        const cetPsbtDeserialized = Psbt.fromBase64(cetPsbt.toBase64());
+        let cetInputTotal = 0;
+        let cetOutputTotal = 0;
+
+        cetPsbtDeserialized.data.inputs.forEach((input, index) => {
+          if (input.witnessUtxo) {
+            cetInputTotal += input.witnessUtxo.value;
+          }
+        });
+
+        cetPsbtDeserialized.txOutputs.forEach((output) => {
+          cetOutputTotal += output.value;
+        });
+
+        const cetFee = cetInputTotal - cetOutputTotal;
+        console.log(
+          `CET ${i} PSBT fee: ${cetFee} sats (inputs: ${cetInputTotal}, outputs: ${cetOutputTotal})`,
+        );
       }
 
       // Get our addresses to determine which inputs we can sign
@@ -572,6 +642,10 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       network: this.network,
     });
 
+    // Get the actual funding output value from the funding transaction
+    const fundingTransaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
+    const actualFundingOutputValue = fundingTransaction.outs[dlcTransactions.fundTxVout].value;
+
     // Add the funding input
     refundPsbt.addInput({
       hash: dlcTransactions.fundTx.txId.serialize(),
@@ -579,7 +653,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       sequence: Number(dlcTransactions.refundTx.inputs[0].sequence),
       witnessUtxo: {
         script: paymentVariant.output!,
-        value: Number(dlcOffer.offerCollateral + (dlcAccept.acceptCollateral || 0n)), // Total funding
+        value: actualFundingOutputValue, // Use actual funding output value
       },
       witnessScript: paymentVariant.redeem!.output,
     });
@@ -687,6 +761,10 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       network: this.network,
     });
 
+    // Get the actual funding output value from the funding transaction
+    const fundingTransaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
+    const actualFundingOutputValue = fundingTransaction.outs[dlcTransactions.fundTxVout].value;
+
     // Add the funding input (CETs spend from the same funding transaction as refund)
     cetPsbt.addInput({
       hash: dlcTransactions.fundTx.txId.serialize(),
@@ -694,7 +772,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       sequence: Number(cetTransaction.inputs[0].sequence),
       witnessUtxo: {
         script: paymentVariant.output!,
-        value: Number(dlcOffer.offerCollateral + (dlcAccept.acceptCollateral || 0n)), // Total funding
+        value: actualFundingOutputValue, // Use actual funding output value
       },
       witnessScript: paymentVariant.redeem!.output,
     });

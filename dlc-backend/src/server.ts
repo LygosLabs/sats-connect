@@ -4,7 +4,13 @@ import { BitcoinJsWalletProvider } from '@atomicfinance/bitcoin-js-wallet-provid
 import { Client } from '@atomicfinance/client';
 import { bitcoin, Input } from '@atomicfinance/types';
 import * as ddkJs from '@bennyblader/ddk-ts';
-import { DlcAccept, DlcOffer, DlcSign } from '@node-dlc/messaging';
+import {
+  DlcAccept,
+  DlcOffer,
+  DlcSign,
+  SingleContractInfo,
+  SingleOracleInfo,
+} from '@node-dlc/messaging';
 import { generateMnemonic } from 'bip39';
 import { BitcoinNetworks } from 'bitcoin-network';
 import cors from 'cors';
@@ -131,6 +137,58 @@ app.post('/api/dlc/accept', async (req, res) => {
       accept: dlcAccept,
       transactions: dlcTransactions,
     });
+
+    const oraclePublicKey = (
+      (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    ).announcement.oraclePublicKey;
+
+    const oracleNonces = (
+      (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    ).announcement.getNonces();
+
+    const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(
+      (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    );
+    console.log('enumMessages', enumMessages);
+
+    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
+
+    // Transform msgsForDdk structure: flatten the nested messages into separate arrays
+    const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
+
+    console.log('msgsForDdk (original)', msgsForDdk);
+    console.log('msgsForDdk (transformed)', transformedMsgsForDdk);
+
+    console.log(
+      `
+      [
+        {
+          publicKey: oraclePublicKey,
+          nonces: oracleNonces,
+        },
+      ],
+      transformedMsgsForDdk
+    `,
+      [
+        {
+          publicKey: oraclePublicKey,
+          nonces: oracleNonces,
+        },
+      ],
+      transformedMsgsForDdk
+    );
+
+    const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
+      [
+        {
+          publicKey: oraclePublicKey,
+          nonces: oracleNonces,
+        },
+      ],
+      transformedMsgsForDdk
+    );
+
+    console.log('adaptorPoints', adaptorPoints);
 
     res.json({
       dlcAcceptHex: dlcAccept.serialize().toString('hex'),
