@@ -601,6 +601,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const refundInput = signedRefundPsbt.data.inputs[0];
       if (refundInput?.partialSig && refundInput.partialSig.length > 0) {
         const partialSig = refundInput.partialSig[0];
+        console.log(`Refund PSBT Signature Debug:`);
+        console.log(`Signature length: ${partialSig.signature.length} bytes`);
+        console.log(`Signature hex: ${partialSig.signature.toString('hex')}`);
         dlcSign.refundSignature = partialSig.signature;
       } else {
         // Fallback to placeholder if extraction fails
@@ -615,23 +618,42 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const cetSigs: any[] = [];
 
-        for (const base64AdaptorSig of signResult.cetTransactions) {
+        for (let i = 0; i < signResult.cetTransactions.length; i++) {
+          const base64AdaptorSig = signResult.cetTransactions[i];
           // Decode the base64 adaptor signature
           const adaptorSignature = Buffer.from(base64AdaptorSig, 'base64');
 
-          console.log(
-            `📝 CET Adaptor Signature (${adaptorSignature.length} bytes):`,
-            adaptorSignature.toString('hex'),
-          );
+          console.log(`CET ${i} Adaptor Signature Debug:`);
+          console.log(`Total length: ${adaptorSignature.length} bytes`);
+          console.log(`Full hex: ${adaptorSignature.toString('hex')}`);
 
-          // Create a signature structure that matches what's expected
-          cetSigs.push({
-            encryptedSig: adaptorSignature,
-            dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
-          });
+          // Try to parse the structure - it might be composite
+          // First 64 bytes might be the actual signature
+          if (adaptorSignature.length >= 64) {
+            const firstPart = adaptorSignature.subarray(0, 64);
+            const remainder = adaptorSignature.subarray(64);
+
+            console.log(`First 64 bytes (potential sig): ${firstPart.toString('hex')}`);
+            console.log(`Remainder (${remainder.length} bytes): ${remainder.toString('hex')}`);
+
+            // Try using just the first 64 bytes as the signature
+            cetSigs.push({
+              encryptedSig: firstPart,
+              dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
+            });
+          } else {
+            console.log(`Signature too short (${adaptorSignature.length} < 64 bytes)`);
+            // Use the full signature if it's shorter than expected
+            cetSigs.push({
+              encryptedSig: adaptorSignature,
+              dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
+            });
+          }
+
+          console.log('---');
         }
 
-        console.log(`✅ Extracted ${cetSigs.length} CET adaptor signatures`);
+        console.log(`Extracted ${cetSigs.length} CET adaptor signatures`);
 
         // Try to set the sigs property - this may need adjustment based on actual structure
         // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
