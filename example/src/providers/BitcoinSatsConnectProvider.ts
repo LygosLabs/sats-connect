@@ -617,6 +617,18 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         console.log(`Compact signature hex: ${compactSignature.toString('hex')}`);
 
         dlcSign.refundSignature = compactSignature;
+
+        // Verify the internal storage is 64 bytes
+        console.log(`✅ Internal refundSignature length: ${dlcSign.refundSignature.length} bytes`);
+        console.log(`✅ Internal refundSignature hex: ${dlcSign.refundSignature.toString('hex')}`);
+
+        // Test serialization to make sure it works
+        try {
+          const testSerialization = dlcSign.serialize();
+          console.log(`✅ DlcSign serialization successful: ${testSerialization.length} bytes`);
+        } catch (serError) {
+          console.error(`❌ DlcSign serialization failed:`, serError);
+        }
       } else {
         // Fallback to placeholder if extraction fails
         dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex');
