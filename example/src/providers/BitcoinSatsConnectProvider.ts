@@ -12,6 +12,7 @@ import {
   EnumeratedDescriptor,
   FundingInput,
   FundingSignatures,
+  ScriptWitnessV0,
   SingleContractInfo,
   SingleOracleInfo,
 } from '@node-dlc/messaging';
@@ -579,16 +580,21 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const fundingSignatures = new FundingSignatures();
 
       // Extract witness elements from the signed funding PSBT
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const witnessElements: any[] = [];
+      const witnessElements: ScriptWitnessV0[][] = [];
       for (const inputIndex of ourFundingInputIndexes) {
         const input = signedFundingPsbt.data.inputs[inputIndex];
         if (input?.partialSig && input.partialSig.length > 0) {
           // Extract signature from partialSig array
           const partialSig = input.partialSig[0];
           const signature = partialSig.signature;
+
+          // Create ScriptWitnessV0 object for the signature
+          const witnessElement = new ScriptWitnessV0();
+          witnessElement.witness = signature;
+          witnessElement.length = signature.length;
+
           // Create witness element array for this input
-          witnessElements.push([signature]);
+          witnessElements.push([witnessElement]);
         }
       }
 
