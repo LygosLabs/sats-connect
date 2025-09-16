@@ -128,6 +128,19 @@ export function TestSatsConnectProvider() {
             contractId ?? undefined,
           );
         }
+
+        // Output DLC messages as JSON for inspection
+        if (dlcOffer && dlcSign && dlcAcceptHex) {
+          console.log('=== DLC MESSAGES JSON OUTPUT ===');
+          console.log('DLC Offer JSON:', JSON.stringify(dlcOffer.toJSON(), null, 2));
+
+          const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
+          console.log('DLC Accept JSON:', JSON.stringify(dlcAccept.toJSON(), null, 2));
+
+          console.log('DLC Sign JSON:', JSON.stringify(dlcSign.toJSON(), null, 2));
+          console.log('=== END DLC MESSAGES ===');
+        }
+
         console.log('dlcSign', dlcSign);
       } catch (error: unknown) {
         dlcError = error instanceof Error ? error.message : 'Unknown error';
@@ -537,6 +550,190 @@ export function TestSatsConnectProvider() {
                           <div>
                             <strong>Contract ID:</strong> {data.dlcSign.contractId.toString('hex')}
                           </div>
+
+                          {/* DLC Message Copy Buttons */}
+                          <div style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+                            <strong>DLC Messages:</strong>
+                            <div
+                              style={{
+                                display: 'flex',
+                                gap: '0.5rem',
+                                marginTop: '0.25rem',
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <Button
+                                onClick={() => {
+                                  const offerHex = data.dlcOffer?.serialize().toString('hex');
+                                  if (offerHex) {
+                                    navigator.clipboard.writeText(offerHex).catch(console.error);
+                                    alert('DLC Offer hex copied to clipboard!');
+                                  }
+                                }}
+                                style={{ fontSize: '0.8em', padding: '0.25rem 0.5rem' }}
+                              >
+                                Copy Offer Hex
+                              </Button>
+                              <Button
+                                onClick={() => {
+                                  if (data.dlcAcceptHex) {
+                                    navigator.clipboard
+                                      .writeText(data.dlcAcceptHex)
+                                      .catch(console.error);
+                                    alert('DLC Accept hex copied to clipboard!');
+                                  }
+                                }}
+                                style={{ fontSize: '0.8em', padding: '0.25rem 0.5rem' }}
+                              >
+                                Copy Accept Hex
+                              </Button>
+                              <Button
+                                onClick={() => {
+                                  const signHex = data.dlcSign?.serialize().toString('hex');
+                                  if (signHex) {
+                                    navigator.clipboard.writeText(signHex).catch(console.error);
+                                    alert('DLC Sign hex copied to clipboard!');
+                                  }
+                                }}
+                                style={{ fontSize: '0.8em', padding: '0.25rem 0.5rem' }}
+                              >
+                                Copy Sign Hex
+                              </Button>
+                            </div>
+                          </div>
+
+                          {/* JSON Output */}
+                          <details style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+                            <summary style={{ cursor: 'pointer', fontWeight: 'bold' }}>
+                              View DLC Messages as JSON
+                            </summary>
+                            <div style={{ marginTop: '0.5rem' }}>
+                              <div style={{ marginBottom: '0.5rem' }}>
+                                <strong>DLC Offer JSON:</strong>
+                                <pre
+                                  style={{
+                                    backgroundColor: '#1a1a1a',
+                                    padding: '0.5rem',
+                                    borderRadius: '4px',
+                                    fontSize: '0.7em',
+                                    overflow: 'auto',
+                                    maxHeight: '200px',
+                                    marginTop: '0.25rem',
+                                    border: '1px solid #444',
+                                  }}
+                                >
+                                  {data.dlcOffer
+                                    ? JSON.stringify(data.dlcOffer.toJSON(), null, 2)
+                                    : 'N/A'}
+                                </pre>
+                                <Button
+                                  onClick={() => {
+                                    const json = data.dlcOffer
+                                      ? JSON.stringify(data.dlcOffer.toJSON(), null, 2)
+                                      : '';
+                                    if (json) {
+                                      navigator.clipboard.writeText(json).catch(console.error);
+                                      alert('DLC Offer JSON copied to clipboard!');
+                                    }
+                                  }}
+                                  style={{
+                                    fontSize: '0.7em',
+                                    padding: '0.2rem 0.4rem',
+                                    marginTop: '0.25rem',
+                                  }}
+                                >
+                                  Copy JSON
+                                </Button>
+                              </div>
+
+                              <div style={{ marginBottom: '0.5rem' }}>
+                                <strong>DLC Accept JSON:</strong>
+                                <pre
+                                  style={{
+                                    backgroundColor: '#1a1a1a',
+                                    padding: '0.5rem',
+                                    borderRadius: '4px',
+                                    fontSize: '0.7em',
+                                    overflow: 'auto',
+                                    maxHeight: '200px',
+                                    marginTop: '0.25rem',
+                                    border: '1px solid #444',
+                                  }}
+                                >
+                                  {data.dlcAcceptHex
+                                    ? JSON.stringify(
+                                        DlcAccept.deserialize(
+                                          Buffer.from(data.dlcAcceptHex, 'hex'),
+                                        ).toJSON(),
+                                        null,
+                                        2,
+                                      )
+                                    : 'N/A'}
+                                </pre>
+                                <Button
+                                  onClick={() => {
+                                    if (data.dlcAcceptHex) {
+                                      const json = JSON.stringify(
+                                        DlcAccept.deserialize(
+                                          Buffer.from(data.dlcAcceptHex, 'hex'),
+                                        ).toJSON(),
+                                        null,
+                                        2,
+                                      );
+                                      navigator.clipboard.writeText(json).catch(console.error);
+                                      alert('DLC Accept JSON copied to clipboard!');
+                                    }
+                                  }}
+                                  style={{
+                                    fontSize: '0.7em',
+                                    padding: '0.2rem 0.4rem',
+                                    marginTop: '0.25rem',
+                                  }}
+                                >
+                                  Copy JSON
+                                </Button>
+                              </div>
+
+                              <div style={{ marginBottom: '0.5rem' }}>
+                                <strong>DLC Sign JSON:</strong>
+                                <pre
+                                  style={{
+                                    backgroundColor: '#1a1a1a',
+                                    padding: '0.5rem',
+                                    borderRadius: '4px',
+                                    fontSize: '0.7em',
+                                    overflow: 'auto',
+                                    maxHeight: '200px',
+                                    marginTop: '0.25rem',
+                                    border: '1px solid #444',
+                                  }}
+                                >
+                                  {data.dlcSign
+                                    ? JSON.stringify(data.dlcSign.toJSON(), null, 2)
+                                    : 'N/A'}
+                                </pre>
+                                <Button
+                                  onClick={() => {
+                                    const json = data.dlcSign
+                                      ? JSON.stringify(data.dlcSign.toJSON(), null, 2)
+                                      : '';
+                                    if (json) {
+                                      navigator.clipboard.writeText(json).catch(console.error);
+                                      alert('DLC Sign JSON copied to clipboard!');
+                                    }
+                                  }}
+                                  style={{
+                                    fontSize: '0.7em',
+                                    padding: '0.2rem 0.4rem',
+                                    marginTop: '0.25rem',
+                                  }}
+                                >
+                                  Copy JSON
+                                </Button>
+                              </div>
+                            </div>
+                          </details>
+
                           <div style={{ marginTop: '0.5rem' }}>
                             <Button
                               onClick={() => {
