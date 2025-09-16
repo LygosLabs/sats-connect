@@ -178,7 +178,7 @@ app.post('/api/dlc/accept', async (req, res) => {
     res.json({
       dlcAcceptHex: dlcAccept.serialize().toString('hex'),
       dlcTransactionsHex: dlcTransactions.serialize().toString('hex'),
-      adaptorPoints: adaptorPoints.map((point: Buffer) => point.toString('hex')),
+      adaptorPoints: adaptorPoints.map((point: Buffer) => point.toString('base64')),
       contractId: contractIdHex,
       success: true,
     });

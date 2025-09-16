@@ -73,7 +73,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
   constructor(options: BitcoinSatsConnectProviderOptions = {}) {
     super();
     this.wallet = Wallet;
-    this.esploraUrl = options.esploraUrl ?? 'https://blockstream.info/testnet/api';
+    this.esploraUrl = options.esploraUrl ?? 'https://mempool.space/testnet/api';
     this.network = options.network ?? BitcoinNetworks.bitcoin_testnet;
   }
 
