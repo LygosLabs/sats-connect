@@ -441,7 +441,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       );
 
       // Calculate funding PSBT fee manually
-      const fundingPsbtDeserialized = Psbt.fromBase64(fundingPsbt.toBase64());
+      const fundingPsbtDeserialized = fundingPsbt;
       let fundingInputTotal = 0;
       let fundingOutputTotal = 0;
 
@@ -461,7 +461,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       );
 
       // Calculate refund PSBT fee manually
-      const refundPsbtDeserialized = Psbt.fromBase64(refundPsbt.toBase64());
+      const refundPsbtDeserialized = refundPsbt;
       let refundInputTotal = 0;
       let refundOutputTotal = 0;
 
@@ -488,7 +488,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         cetPsbts.push(cetPsbt);
 
         // Calculate CET PSBT fee manually
-        const cetPsbtDeserialized = Psbt.fromBase64(cetPsbt.toBase64());
+        const cetPsbtDeserialized = cetPsbt;
         let cetInputTotal = 0;
         let cetOutputTotal = 0;
 
@@ -574,6 +574,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const signResult = signResponse.result;
 
       // Extract funding transaction signatures
+      // SatsConnect returns PSBTs as base64 strings
       const signedFundingPsbt = Psbt.fromBase64(signResult.fundingTransaction);
       const fundingSignatures = new FundingSignatures();
 
@@ -581,13 +582,11 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const witnessElements: any[] = [];
       for (const inputIndex of ourFundingInputIndexes) {
-        const witness = signedFundingPsbt.data.inputs[inputIndex]?.finalScriptWitness;
-        if (witness && witness.length > 2) {
-          // Skip the first byte (witness stack count) and get signature length + signature
-          let offset = 1;
-          const sigLength = witness[offset];
-          offset += 1;
-          const signature = witness.subarray(offset, offset + sigLength);
+        const input = signedFundingPsbt.data.inputs[inputIndex];
+        if (input?.partialSig && input.partialSig.length > 0) {
+          // Extract signature from partialSig array
+          const partialSig = input.partialSig[0];
+          const signature = partialSig.signature;
           // Create witness element array for this input
           witnessElements.push([signature]);
         }
@@ -599,15 +598,10 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
       // Extract refund transaction signature
       const signedRefundPsbt = Psbt.fromBase64(signResult.refundTransaction);
-      if (signedRefundPsbt.data.inputs[0]?.finalScriptWitness) {
-        const witness = signedRefundPsbt.data.inputs[0].finalScriptWitness;
-        if (witness.length > 2) {
-          let offset = 1;
-          const sigLength = witness[offset];
-          offset += 1;
-          const refundSignature = witness.subarray(offset, offset + sigLength);
-          dlcSign.refundSignature = refundSignature;
-        }
+      const refundInput = signedRefundPsbt.data.inputs[0];
+      if (refundInput?.partialSig && refundInput.partialSig.length > 0) {
+        const partialSig = refundInput.partialSig[0];
+        dlcSign.refundSignature = partialSig.signature;
       } else {
         // Fallback to placeholder if extraction fails
         dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex');
@@ -616,36 +610,34 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       // Extract CET adaptor signatures
       const cetAdaptorSignatures = new CetAdaptorSignatures();
 
-      // For now, use a simplified approach - the actual structure may need adjustment
-      // based on the specific requirements of the CetAdaptorSignatures class
+      // The new format returns base64-encoded adaptor signatures directly
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const cetSigs: any[] = [];
 
-        for (const cetPsbtBase64 of signResult.cetTransactions) {
-          const signedCetPsbt = Psbt.fromBase64(cetPsbtBase64);
-          if (signedCetPsbt.data.inputs[0]?.finalScriptWitness) {
-            const witness = signedCetPsbt.data.inputs[0].finalScriptWitness;
-            if (witness.length > 2) {
-              let offset = 1;
-              const sigLength = witness[offset];
-              offset += 1;
-              const signature = witness.subarray(offset, offset + sigLength);
+        for (const base64AdaptorSig of signResult.cetTransactions) {
+          // Decode the base64 adaptor signature
+          const adaptorSignature = Buffer.from(base64AdaptorSig, 'base64');
 
-              // Create a signature structure that matches what's expected
-              cetSigs.push({
-                encryptedSig: signature,
-                dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
-              });
-            }
-          }
+          console.log(
+            `📝 CET Adaptor Signature (${adaptorSignature.length} bytes):`,
+            adaptorSignature.toString('hex'),
+          );
+
+          // Create a signature structure that matches what's expected
+          cetSigs.push({
+            encryptedSig: adaptorSignature,
+            dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
+          });
         }
+
+        console.log(`✅ Extracted ${cetSigs.length} CET adaptor signatures`);
 
         // Try to set the sigs property - this may need adjustment based on actual structure
         // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
         (cetAdaptorSignatures as any).sigs = cetSigs;
       } catch (error) {
-        console.warn('Failed to extract CET signatures, using empty structure:', error);
+        console.warn('Failed to extract CET adaptor signatures, using empty structure:', error);
         // Use empty structure if extraction fails
       }
 
