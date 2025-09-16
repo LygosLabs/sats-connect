@@ -627,28 +627,14 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
           console.log(`Total length: ${adaptorSignature.length} bytes`);
           console.log(`Full hex: ${adaptorSignature.toString('hex')}`);
 
-          // Try to parse the structure - it might be composite
-          // First 64 bytes might be the actual signature
-          if (adaptorSignature.length >= 64) {
-            const firstPart = adaptorSignature.subarray(0, 64);
-            const remainder = adaptorSignature.subarray(64);
+          // Use the full 162-byte adaptor signature as expected
+          console.log(`Using full ${adaptorSignature.length}-byte adaptor signature`);
 
-            console.log(`First 64 bytes (potential sig): ${firstPart.toString('hex')}`);
-            console.log(`Remainder (${remainder.length} bytes): ${remainder.toString('hex')}`);
-
-            // Try using just the first 64 bytes as the signature
-            cetSigs.push({
-              encryptedSig: firstPart,
-              dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
-            });
-          } else {
-            console.log(`Signature too short (${adaptorSignature.length} < 64 bytes)`);
-            // Use the full signature if it's shorter than expected
-            cetSigs.push({
-              encryptedSig: adaptorSignature,
-              dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
-            });
-          }
+          // Create a signature structure that matches what's expected
+          cetSigs.push({
+            encryptedSig: adaptorSignature, // Use the full 162-byte signature
+            dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
+          });
 
           console.log('---');
         }
