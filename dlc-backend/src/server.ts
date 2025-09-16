@@ -129,10 +129,20 @@ app.post('/api/dlc/accept', async (req, res) => {
     const dlcAccept = acceptDlcOfferResponse.dlcAccept;
     const dlcTransactions = acceptDlcOfferResponse.dlcTransactions;
 
-    const contractId = dlcOffer.temporaryContractId.toString('hex');
+    // Calculate the proper contract ID using the funding transaction
+    const fundTxId = dlcTransactions.fundTx.txId.serialize();
+    const fundOutputIndex = dlcTransactions.fundTxVout;
+    const temporaryContractId = dlcOffer.temporaryContractId;
 
-    // Store the state including transactions
-    dlcStore.set(contractId, {
+    const contractId = await bitcoinWithDdk.getMethod('computeContractId')(
+      fundTxId,
+      fundOutputIndex,
+      temporaryContractId
+    );
+
+    // Store the state including transactions using the computed contract ID as hex string
+    const contractIdHex = contractId.toString('hex');
+    dlcStore.set(contractIdHex, {
       offer: dlcOffer,
       accept: dlcAccept,
       transactions: dlcTransactions,
@@ -149,34 +159,11 @@ app.post('/api/dlc/accept', async (req, res) => {
     const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(
       (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
     );
-    console.log('enumMessages', enumMessages);
 
     const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
 
     // Transform msgsForDdk structure: flatten the nested messages into separate arrays
     const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
-
-    console.log('msgsForDdk (original)', msgsForDdk);
-    console.log('msgsForDdk (transformed)', transformedMsgsForDdk);
-
-    console.log(
-      `
-      [
-        {
-          publicKey: oraclePublicKey,
-          nonces: oracleNonces,
-        },
-      ],
-      transformedMsgsForDdk
-    `,
-      [
-        {
-          publicKey: oraclePublicKey,
-          nonces: oracleNonces,
-        },
-      ],
-      transformedMsgsForDdk
-    );
 
     const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
       [
@@ -188,12 +175,11 @@ app.post('/api/dlc/accept', async (req, res) => {
       transformedMsgsForDdk
     );
 
-    console.log('adaptorPoints', adaptorPoints);
-
     res.json({
       dlcAcceptHex: dlcAccept.serialize().toString('hex'),
       dlcTransactionsHex: dlcTransactions.serialize().toString('hex'),
-      contractId,
+      adaptorPoints: adaptorPoints.map((point: Buffer) => point.toString('hex')),
+      contractId: contractIdHex,
       success: true,
     });
   } catch (error: any) {
@@ -288,54 +274,99 @@ app.get('/api/dlc/:contractId', (req, res) => {
 });
 
 /**
- * Calculate adaptor points for DLC CET signing
- * POST /api/adaptor-points
- * Body: { oraclePubkey: string, oracleNonces: string[], messages: string[] }
- * Returns: { adaptorPoints: string[] }
+ * Broadcast a finalized transaction
+ * POST /api/dlc/broadcast
+ * Body: { txHex: string }
+ * Returns: { txId: string, success: boolean }
  */
-app.post('/api/adaptor-points', async (req, res) => {
+app.post('/api/dlc/broadcast', async (req, res) => {
   try {
-    const { oraclePubkey, oracleNonces, messages } = req.body;
+    const { txHex } = req.body;
 
-    if (!oraclePubkey || !oracleNonces || !messages) {
-      return res.status(400).json({
-        error: 'oraclePubkey, oracleNonces, and messages are required',
-      });
+    if (!txHex) {
+      return res.status(400).json({ error: 'txHex is required' });
     }
 
-    if (oracleNonces.length !== messages.length) {
-      return res.status(400).json({
-        error: 'oracleNonces and messages arrays must have the same length',
-      });
+    // Use Esplora API to broadcast the transaction
+    const broadcastResponse = await fetch(`${esploraProvider.url}/tx`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+      body: txHex,
+    });
+
+    if (!broadcastResponse.ok) {
+      const errorText = await broadcastResponse.text();
+      throw new Error(`Broadcast failed: ${broadcastResponse.status} ${errorText}`);
     }
 
-    // TODO: Import and use your schnorr-adaptor-points module here
-    // const { createAdaptorPoint } = require('schnorr-adaptor-points');
-
-    const adaptorPoints = [];
-
-    for (let i = 0; i < messages.length; i++) {
-      // For now, return placeholder adaptor points
-      // In real implementation, use your createAdaptorPoint function:
-      // const adaptorPoint = createAdaptorPoint([oraclePubkey], [messages[i]], [oracleNonces[i]]);
-
-      // Placeholder 32-byte adaptor point (in real implementation, use actual calculation)
-      const placeholderPoint = Buffer.from(
-        `${'0'.repeat(62)}${i.toString(16).padStart(2, '0')}`,
-        'hex'
-      ).toString('hex');
-
-      adaptorPoints.push(placeholderPoint);
-    }
+    // The response should be the transaction ID
+    const txId = await broadcastResponse.text();
 
     res.json({
-      adaptorPoints,
+      txId: txId.trim(),
       success: true,
+      message: 'Transaction broadcast successfully',
     });
   } catch (error: any) {
-    console.error('Error calculating adaptor points:', error);
+    console.error('Error broadcasting transaction:', error);
     res.status(500).json({
-      error: 'Failed to calculate adaptor points',
+      error: 'Failed to broadcast transaction',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Execute DLC with oracle attestation
+ * POST /api/dlc/execute
+ * Body: { contractId: string, oracleAttestationHex: string }
+ * Returns: { txId: string, txHex: string, success: boolean }
+ */
+app.post('/api/dlc/execute', async (req, res) => {
+  try {
+    const { contractId, oracleAttestationHex } = req.body;
+
+    if (!contractId || !oracleAttestationHex) {
+      return res.status(400).json({ error: 'contractId and oracleAttestationHex are required' });
+    }
+
+    // Get stored DLC state
+    const dlcState = dlcStore.get(contractId);
+    if (!dlcState?.offer || !dlcState?.accept || !dlcState?.sign || !dlcState?.transactions) {
+      return res.status(404).json({ error: 'Complete DLC state not found for contract ID' });
+    }
+
+    // Deserialize the oracle attestation
+    const { OracleAttestation } = await import('@node-dlc/messaging');
+    const oracleAttestation = OracleAttestation.deserialize(
+      Buffer.from(oracleAttestationHex, 'hex')
+    );
+
+    // Execute the DLC from acceptor's perspective (server is acceptor, not offerer)
+    const isOfferer = false;
+    const executionTx = await bitcoinWithDdk.dlc.execute(
+      dlcState.offer,
+      dlcState.accept,
+      dlcState.sign,
+      dlcState.transactions,
+      oracleAttestation,
+      isOfferer
+    );
+
+    const txHex = executionTx.serialize().toString('hex');
+
+    res.json({
+      txId: executionTx.txId.serialize().toString('hex'),
+      txHex,
+      success: true,
+      message: 'DLC executed successfully',
+    });
+  } catch (error: any) {
+    console.error('Error executing DLC:', error);
+    res.status(500).json({
+      error: 'Failed to execute DLC',
       details: error.message,
     });
   }

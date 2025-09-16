@@ -36,8 +36,8 @@ importers:
         specifier: ^4.1.12
         version: 4.1.12
       '@bennyblader/ddk-ts':
-        specifier: ^0.3.27
-        version: 0.3.27
+        specifier: ^0.3.30
+        version: 0.3.30
       '@node-dlc/messaging':
         specifier: ^1.1.2
         version: 1.1.2
@@ -142,8 +142,8 @@ packages:
     resolution: {integrity: sha512-9uIQ10o0WGdpP6GDhXcdOJPJuDgFtIDtN/9+ArJQ2NAfAmiuhTQdzkaTGR33v43GYS2UrSA0eX2pPPHoFVvpxA==}
     engines: {node: '>=6.9.0'}
 
-  '@bennyblader/ddk-ts@0.3.27':
-    resolution: {integrity: sha512-hdtK/he/3gJAtfmsVEaw0hSV+t4BFuXrp9grn72ncSksrXn/YY5276RSQNMWEnX2Y5yrtGumCyHMIJFJpmGQ4g==}
+  '@bennyblader/ddk-ts@0.3.30':
+    resolution: {integrity: sha512-mZw9rE+dRjAYUKQPRlGawslGCTds22p658HH8EC1JaP/X/KnCH/SNTgCR+5IFf7ommyKupt4Wq9ds4pwcjw9Eg==}
     engines: {node: '>= 6.14.2 < 7 || >= 8.11.2 < 9 || >= 9.11.0 < 10 || >= 10.0.0'}
 
   '@bitcoin-js/tiny-secp256k1-asmjs@2.2.4':
@@ -1384,7 +1384,7 @@ snapshots:
 
   '@babel/runtime@7.28.3': {}
 
-  '@bennyblader/ddk-ts@0.3.27': {}
+  '@bennyblader/ddk-ts@0.3.30': {}
 
   '@bitcoin-js/tiny-secp256k1-asmjs@2.2.4':
     dependencies:

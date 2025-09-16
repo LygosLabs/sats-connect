@@ -30,6 +30,32 @@ export function TestSatsConnectProvider() {
 
   const [provider] = useState(() => new BitcoinSatsConnectProvider());
 
+  const [finalizeState, setFinalizeState] = useState<{
+    isLoading: boolean;
+    txId?: string;
+    txHex?: string;
+    error?: string;
+  }>({ isLoading: false });
+
+  const [broadcastState, setBroadcastState] = useState<{
+    isLoading: boolean;
+    success?: boolean;
+    error?: string;
+  }>({ isLoading: false });
+
+  const [executeState, setExecuteState] = useState<{
+    isLoading: boolean;
+    txId?: string;
+    txHex?: string;
+    error?: string;
+  }>({ isLoading: false });
+
+  const [executeBroadcastState, setExecuteBroadcastState] = useState<{
+    isLoading: boolean;
+    success?: boolean;
+    error?: string;
+  }>({ isLoading: false });
+
   const { refetch, error, data, isFetching, isError, isSuccess } = useQuery({
     queryKey: ['testSatsConnectProvider'],
     queryFn: async () => {
@@ -45,6 +71,7 @@ export function TestSatsConnectProvider() {
       let dlcSign: DlcSign | null = null;
       let contractId: string | null = null;
       let dlcError: string | null = null;
+      let adaptorPoints: string[] | null = null;
 
       try {
         // Step 1: Create DLC offer using SatsConnect provider
@@ -83,15 +110,23 @@ export function TestSatsConnectProvider() {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         dlcTransactionsHex = acceptResponse.dlcTransactionsHex;
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+        adaptorPoints = acceptResponse.adaptorPoints;
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         contractId = acceptResponse.contractId;
 
-        if (dlcAcceptHex && dlcTransactionsHex) {
+        if (dlcAcceptHex && dlcTransactionsHex && adaptorPoints) {
           const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
           const dlcTransactions = DlcTransactions.deserialize(
             Buffer.from(dlcTransactionsHex, 'hex'),
           );
 
-          dlcSign = await provider.signDlcAccept(dlcOffer, dlcAccept, dlcTransactions);
+          dlcSign = await provider.signDlcAccept(
+            dlcOffer,
+            dlcAccept,
+            dlcTransactions,
+            adaptorPoints,
+            contractId ?? undefined,
+          );
         }
         console.log('dlcSign', dlcSign);
       } catch (error: unknown) {
@@ -114,12 +149,159 @@ export function TestSatsConnectProvider() {
     enabled: false,
   });
 
+  const handleFinalize = async () => {
+    if (!data?.dlcSign || !data?.contractId) {
+      setFinalizeState({ isLoading: false, error: 'No DLC sign or contract ID available' });
+      return;
+    }
+
+    setFinalizeState({ isLoading: true });
+
+    try {
+      const response = await fetch('http://localhost:3001/api/dlc/finalize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contractId: data.contractId,
+          dlcSignHex: data.dlcSign.serialize().toString('hex'),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string };
+        throw new Error(`Backend error: ${errorData.error}`);
+      }
+
+      const result = (await response.json()) as { txId: string; txHex: string };
+      setFinalizeState({
+        isLoading: false,
+        txId: result.txId,
+        txHex: result.txHex,
+      });
+    } catch (error: unknown) {
+      setFinalizeState({
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  };
+
+  const handleBroadcast = async () => {
+    if (!finalizeState.txHex) {
+      setBroadcastState({ isLoading: false, error: 'No transaction hex available' });
+      return;
+    }
+
+    setBroadcastState({ isLoading: true });
+
+    try {
+      const response = await fetch('http://localhost:3001/api/dlc/broadcast', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          txHex: finalizeState.txHex,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string };
+        throw new Error(`Backend error: ${errorData.error}`);
+      }
+
+      setBroadcastState({ isLoading: false, success: true });
+    } catch (error: unknown) {
+      setBroadcastState({
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  };
+
+  const handleExecute = async () => {
+    if (!data?.contractId) {
+      setExecuteState({ isLoading: false, error: 'No contract ID available' });
+      return;
+    }
+
+    setExecuteState({ isLoading: true });
+
+    try {
+      const response = await fetch('http://localhost:3001/api/dlc/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contractId: data.contractId,
+          oracleAttestationHex: oracleAttestation.serialize().toString('hex'),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string };
+        throw new Error(`Backend error: ${errorData.error}`);
+      }
+
+      const result = (await response.json()) as { txId: string; txHex: string };
+      setExecuteState({
+        isLoading: false,
+        txId: result.txId,
+        txHex: result.txHex,
+      });
+    } catch (error: unknown) {
+      setExecuteState({
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  };
+
+  const handleExecuteBroadcast = async () => {
+    if (!executeState.txHex) {
+      setExecuteBroadcastState({
+        isLoading: false,
+        error: 'No execution transaction hex available',
+      });
+      return;
+    }
+
+    setExecuteBroadcastState({ isLoading: true });
+
+    try {
+      const response = await fetch('http://localhost:3001/api/dlc/broadcast', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          txHex: executeState.txHex,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string };
+        throw new Error(`Backend error: ${errorData.error}`);
+      }
+
+      setExecuteBroadcastState({ isLoading: false, success: true });
+    } catch (error: unknown) {
+      setExecuteBroadcastState({
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  };
+
   return (
     <Card>
       <h3>Test SatsConnect Provider</h3>
       <p>
-        Test complete DLC flow: SatsConnect creates offer → Backend (DDK) accepts → Ready for
-        signing
+        Test complete DLC flow: SatsConnect creates offer → Backend (DDK) accepts → Sign → Finalize
+        → Broadcast → Execute with Oracle → Broadcast Execution
       </p>
 
       <Button
@@ -127,7 +309,7 @@ export function TestSatsConnectProvider() {
           refetch().catch(console.error);
         }}
       >
-        Test Complete DLC Flow (Offer → Backend Accept)
+        Test Complete DLC Flow (Offer → Accept → Sign)
       </Button>
 
       {(() => {
@@ -335,6 +517,153 @@ export function TestSatsConnectProvider() {
                           <div style={{ marginTop: '0.5rem', fontStyle: 'italic' }}>
                             🎯 Ready for next step: Sign the accept with SatsConnect wallet
                           </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {data.dlcSign && (
+                      <div style={{ marginBottom: '1rem' }}>
+                        <strong>✅ DLC Sign Created Successfully!</strong>
+                        <div
+                          style={{
+                            marginTop: '0.5rem',
+                            padding: '0.75rem',
+                            backgroundColor: '#2a2a2a',
+                            borderRadius: '4px',
+                            fontSize: '0.85em',
+                            color: '#ffffff',
+                          }}
+                        >
+                          <div>
+                            <strong>Contract ID:</strong> {data.dlcSign.contractId.toString('hex')}
+                          </div>
+                          <div style={{ marginTop: '0.5rem' }}>
+                            <Button
+                              onClick={() => {
+                                handleFinalize().catch(console.error);
+                              }}
+                              disabled={finalizeState.isLoading}
+                              style={{ marginRight: '0.5rem' }}
+                            >
+                              {finalizeState.isLoading ? 'Finalizing...' : 'Finalize DLC'}
+                            </Button>
+                            {finalizeState.txHex && (
+                              <Button
+                                onClick={() => {
+                                  handleBroadcast().catch(console.error);
+                                }}
+                                disabled={broadcastState.isLoading}
+                              >
+                                {broadcastState.isLoading
+                                  ? 'Broadcasting...'
+                                  : 'Broadcast Transaction'}
+                              </Button>
+                            )}
+                          </div>
+                          {finalizeState.error && (
+                            <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
+                              <strong>Finalize Error:</strong> {finalizeState.error}
+                            </div>
+                          )}
+                          {finalizeState.txId && (
+                            <div style={{ marginTop: '0.5rem' }}>
+                              <strong>✅ Transaction Finalized!</strong>
+                              <div style={{ fontSize: '0.8em', marginTop: '0.25rem' }}>
+                                TX ID: {finalizeState.txId}
+                              </div>
+                            </div>
+                          )}
+                          {broadcastState.success && (
+                            <div style={{ color: '#28a745', marginTop: '0.5rem' }}>
+                              <strong>✅ Transaction Broadcast Successfully!</strong>
+                            </div>
+                          )}
+                          {broadcastState.error && (
+                            <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
+                              <strong>Broadcast Error:</strong> {broadcastState.error}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {broadcastState.success && (
+                      <div style={{ marginBottom: '1rem' }}>
+                        <strong>🎯 DLC Ready for Execution!</strong>
+                        <div
+                          style={{
+                            marginTop: '0.5rem',
+                            padding: '0.75rem',
+                            backgroundColor: '#2a2a2a',
+                            borderRadius: '4px',
+                            fontSize: '0.85em',
+                            color: '#ffffff',
+                          }}
+                        >
+                          <div style={{ marginBottom: '0.5rem' }}>
+                            The funding transaction has been broadcast. You can now execute the DLC
+                            using the oracle attestation.
+                          </div>
+                          <div style={{ marginTop: '0.5rem' }}>
+                            <Button
+                              onClick={() => {
+                                handleExecute().catch(console.error);
+                              }}
+                              disabled={executeState.isLoading}
+                            >
+                              {executeState.isLoading ? 'Executing...' : 'Execute DLC'}
+                            </Button>
+                          </div>
+                          {executeState.error && (
+                            <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
+                              <strong>Execute Error:</strong> {executeState.error}
+                            </div>
+                          )}
+                          {executeState.txId && (
+                            <div style={{ marginTop: '0.5rem' }}>
+                              <strong>✅ DLC Executed Successfully!</strong>
+                              <div style={{ fontSize: '0.8em', marginTop: '0.25rem' }}>
+                                Execution TX ID: {executeState.txId}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: '0.8em',
+                                  marginTop: '0.25rem',
+                                  color: '#28a745',
+                                }}
+                              >
+                                🎉 DLC contract completed! The oracle attestation determined the
+                                outcome and funds have been distributed accordingly.
+                              </div>
+                              <div style={{ marginTop: '0.5rem' }}>
+                                <Button
+                                  onClick={() => {
+                                    handleExecuteBroadcast().catch(console.error);
+                                  }}
+                                  disabled={executeBroadcastState.isLoading}
+                                >
+                                  {executeBroadcastState.isLoading
+                                    ? 'Broadcasting Execution...'
+                                    : 'Broadcast Execution Transaction'}
+                                </Button>
+                              </div>
+                              {executeBroadcastState.success && (
+                                <div style={{ color: '#28a745', marginTop: '0.5rem' }}>
+                                  <strong>✅ Execution Transaction Broadcast Successfully!</strong>
+                                  <div style={{ fontSize: '0.8em', marginTop: '0.25rem' }}>
+                                    🏆 DLC fully settled on-chain! The contract has been executed
+                                    and funds distributed based on the oracle outcome.
+                                  </div>
+                                </div>
+                              )}
+                              {executeBroadcastState.error && (
+                                <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
+                                  <strong>Execution Broadcast Error:</strong>{' '}
+                                  {executeBroadcastState.error}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
