@@ -263,6 +263,109 @@ app.post('/api/dlc/finalize', async (req, res) => {
 });
 
 /**
+ * Create DLC transactions from offer and accept
+ * POST /api/dlc/create-txs
+ * Body: { dlcOfferHex: string, dlcAcceptHex: string }
+ * Returns: { dlcTransactionsHex: string, success: boolean }
+ */
+app.post('/api/dlc/create-txs', async (req, res) => {
+  try {
+    const { dlcOfferHex, dlcAcceptHex } = req.body;
+
+    if (!dlcOfferHex || !dlcAcceptHex) {
+      return res.status(400).json({ error: 'dlcOfferHex and dlcAcceptHex are required' });
+    }
+
+    // Deserialize the DLC messages
+    const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
+    const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
+
+    // Use DDK client to create DLC transactions
+    const createDlcTxsResponse = await bitcoinWithDdk.getMethod('createDlcTxs')(
+      dlcOffer,
+      dlcAccept
+    );
+
+    res.json({
+      dlcTransactionsHex: createDlcTxsResponse.dlcTransactions.serialize().toString('hex'),
+      success: true,
+    });
+  } catch (error: any) {
+    console.error('Error creating DLC transactions:', error);
+    res.status(500).json({
+      error: 'Failed to create DLC transactions',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Manual finalize DLC with all messages provided
+ * POST /api/dlc/manual-finalize
+ * Body: { dlcOfferHex: string, dlcAcceptHex: string, dlcSignHex: string }
+ * Returns: { txId: string, txHex: string, success: boolean }
+ */
+app.post('/api/dlc/manual-finalize', async (req, res) => {
+  try {
+    const { dlcOfferHex, dlcAcceptHex, dlcSignHex } = req.body;
+
+    if (!dlcOfferHex || !dlcAcceptHex || !dlcSignHex) {
+      return res.status(400).json({
+        error: 'dlcOfferHex, dlcAcceptHex, and dlcSignHex are required',
+      });
+    }
+
+    // Deserialize all DLC messages
+    const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
+    const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
+    const dlcSign = DlcSign.deserialize(Buffer.from(dlcSignHex, 'hex'));
+
+    console.log('🔍 Manual Finalize Debug Info:');
+    console.log('DLC Offer valid:', dlcOffer ? 'yes' : 'no');
+    console.log('DLC Accept valid:', dlcAccept ? 'yes' : 'no');
+    console.log('DLC Sign valid:', dlcSign ? 'yes' : 'no');
+    console.log('Contract ID:', dlcSign.contractId.toString('hex'));
+
+    // Create DLC transactions
+    const createDlcTxsResponse = await bitcoinWithDdk.getMethod('createDlcTxs')(
+      dlcOffer,
+      dlcAccept
+    );
+
+    console.log('🔍 Calling finalizeDlcSign with manual messages...');
+    let fundTx;
+    try {
+      // Use DDK client to finalize
+      fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
+        dlcOffer,
+        dlcAccept,
+        dlcSign,
+        createDlcTxsResponse.dlcTransactions
+      );
+      console.log('✅ Manual finalizeDlcSign completed successfully');
+    } catch (finalizeError) {
+      console.error('❌ Manual finalizeDlcSign error:', finalizeError);
+      throw finalizeError;
+    }
+
+    const txHex = fundTx.serialize().toString('hex');
+
+    res.json({
+      txId: fundTx.txId.serialize().toString('hex'),
+      txHex,
+      success: true,
+      message: 'DLC manually finalized successfully',
+    });
+  } catch (error: any) {
+    console.error('Error manually finalizing DLC:', error);
+    res.status(500).json({
+      error: 'Failed to manually finalize DLC',
+      details: error.message,
+    });
+  }
+});
+
+/**
  * Get DLC state
  * GET /api/dlc/:contractId
  */

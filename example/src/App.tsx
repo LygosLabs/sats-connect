@@ -27,6 +27,7 @@ import { CreateInscription } from './components/createInscription/index.tsx';
 import EtchRunes from './components/EtchRunes';
 import { GlobalStateProvider } from './components/GlobalStateProvider/index.tsx';
 import { useGlobalState } from './components/GlobalStateProvider/use-global-state.tsx';
+import { ManualDlcFinalize } from './components/ManualDlcFinalize';
 import MintRunes from './components/MintRunes';
 import { MobileUniversalLink } from './components/mobile/universalLink.tsx';
 import { SendSip10 } from './components/stacks/SendSip10';
@@ -211,6 +212,7 @@ const BitcoinMethods = () => {
         onDisconnect={disconnect}
       />
       <TestSatsConnectProvider />
+      <ManualDlcFinalize />
       <TestAdaptorPoints />
       <GetInfo />
       <SignMessage addresses={[...btcAddressInfo]} />
