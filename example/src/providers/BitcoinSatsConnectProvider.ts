@@ -621,14 +621,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         // Verify the internal storage is 64 bytes
         console.log(`✅ Internal refundSignature length: ${dlcSign.refundSignature.length} bytes`);
         console.log(`✅ Internal refundSignature hex: ${dlcSign.refundSignature.toString('hex')}`);
-
-        // Test serialization to make sure it works
-        try {
-          const testSerialization = dlcSign.serialize();
-          console.log(`✅ DlcSign serialization successful: ${testSerialization.length} bytes`);
-        } catch (serError) {
-          console.error(`❌ DlcSign serialization failed:`, serError);
-        }
       } else {
         // Fallback to placeholder if extraction fails
         dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex');
@@ -674,6 +666,18 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       }
 
       dlcSign.cetAdaptorSignatures = cetAdaptorSignatures;
+
+      console.log('dlcSign.contractId', dlcSign.contractId.toString('hex'));
+      console.log('dlcSign.refundSignature', dlcSign.refundSignature.toString('hex'));
+      console.log('dlcSign.cetAdaptorSignatures', dlcSign.cetAdaptorSignatures);
+      console.log('dlcSign.fundingSignatures', dlcSign.fundingSignatures);
+
+      console.log('dlcSign.validate');
+      dlcSign.validate();
+      console.log('dlcSign.serialize');
+      dlcSign.serialize();
+      console.log('dlcSign.toJSON');
+      dlcSign.toJSON();
 
       return dlcSign;
     } catch (error: unknown) {
