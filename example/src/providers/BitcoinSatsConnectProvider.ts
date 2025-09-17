@@ -222,6 +222,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         fundingInput.prevTx = tx;
         fundingInput.prevTxVout = input.vout;
         fundingInput.sequence = Sequence.default();
+        console.log(
+          `Created funding input with sequence: ${fundingInput.sequence.toString()} (${Number(fundingInput.sequence.toString())})`,
+        );
         fundingInput.maxWitnessLen = 108; // Standard witness length for P2WPKH
         fundingInput.redeemScript = Buffer.from('', 'hex');
         return fundingInput;
@@ -715,28 +718,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         );
 
         console.log('🔍 PSBT vs DLC Transaction Input Comparison:');
-        validationPsbt.data.globalMap.unsignedTx.ins.forEach((psbtInput, index) => {
-          const psbtTxid = psbtInput.hash.reverse().toString('hex');
-          const psbtVout = psbtInput.index;
-
-          if (index < sortedInputs.length) {
-            const dlcInput = sortedInputs[index];
-            const dlcTxid = dlcInput.prevTx.txId.toString();
-            const dlcVout = dlcInput.prevTxVout;
-
-            console.log(`  Input ${index}:`);
-            console.log(`    PSBT: ${psbtTxid}:${psbtVout}`);
-            console.log(`    DLC:  ${dlcTxid}:${dlcVout}`);
-            console.log(`    Match: ${psbtTxid === dlcTxid && psbtVout === dlcVout}`);
-
-            // Check if this is an offerer input that should have a signature
-            const isOffererInput = dlcOffer.fundingInputs.some(
-              (offerInput) =>
-                offerInput.prevTx.txId.toString() === dlcTxid && offerInput.prevTxVout === dlcVout,
-            );
-            console.log(`    Is offerer input: ${isOffererInput}`);
-          }
-        });
 
         // Validate witness element count matches offerer input count
         const offererInputCount = dlcOffer.fundingInputs.filter((input) => !input.dlcInput).length;
@@ -1058,12 +1039,49 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         value: Number(prevOut.value.sats),
       };
 
-      fundingPsbt.addInput({
-        hash: fundingInput.prevTx.txId.serialize().toString('hex'),
-        index: fundingInput.prevTxVout,
-        sequence: Number(fundingInput.sequence),
-        witnessUtxo,
-      });
+      console.log(
+        `Adding input to PSBT: ${fundingInput.prevTx.txId.toString()}:${fundingInput.prevTxVout}`,
+      );
+      console.log(
+        `  Sequence from fundingInput: ${fundingInput.sequence.toString()} (${Number(fundingInput.sequence.toString())})`,
+      );
+
+      // Check what sequence the DLC transaction actually uses
+      const dlcTxInput = dlcTransactions.fundTx.inputs.find(
+        (input) =>
+          input.outpoint.txid.toString() === fundingInput.prevTx.txId.toString() &&
+          input.outpoint.outputIndex === fundingInput.prevTxVout,
+      );
+
+      if (dlcTxInput) {
+        console.log(
+          `  Sequence in DLC transaction: ${dlcTxInput.sequence.toString()} (${Number(dlcTxInput.sequence.toString())})`,
+        );
+        console.log(
+          `  Sequence match: ${Number(fundingInput.sequence.toString()) === Number(dlcTxInput.sequence.toString())}`,
+        );
+
+        // Use the sequence from the DLC transaction instead of the funding input
+        const actualSequence = Number(dlcTxInput.sequence.toString());
+        console.log(`  Using actual DLC transaction sequence: ${actualSequence}`);
+
+        fundingPsbt.addInput({
+          hash: fundingInput.prevTx.txId.serialize().toString('hex'),
+          index: fundingInput.prevTxVout,
+          sequence: actualSequence,
+          witnessUtxo,
+        });
+      } else {
+        console.log(
+          `  ⚠️ Could not find matching input in DLC transaction, using original sequence`,
+        );
+        fundingPsbt.addInput({
+          hash: fundingInput.prevTx.txId.serialize().toString('hex'),
+          index: fundingInput.prevTxVout,
+          sequence: Number(fundingInput.sequence),
+          witnessUtxo,
+        });
+      }
     }
 
     for (const output of transaction.outs) {
@@ -1072,6 +1090,11 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         value: output.value,
       });
     }
+
+    // Set locktime to match the DLC transaction
+    const dlcTxLocktime = Number(dlcTransactions.fundTx.locktime.toString());
+    console.log(`🔍 Setting PSBT locktime to match DLC transaction: ${dlcTxLocktime}`);
+    fundingPsbt.setLocktime(dlcTxLocktime);
 
     return fundingPsbt;
   }
