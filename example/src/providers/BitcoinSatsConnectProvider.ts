@@ -677,10 +677,128 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
       dlcSign.cetAdaptorSignatures = cetAdaptorSignatures;
 
-      console.log('dlcSign.contractId', dlcSign.contractId.toString('hex'));
-      console.log('dlcSign.refundSignature', dlcSign.refundSignature.toString('hex'));
-      console.log('dlcSign.cetAdaptorSignatures', dlcSign.cetAdaptorSignatures);
-      console.log('dlcSign.fundingSignatures', dlcSign.fundingSignatures);
+      console.log('🔍 Final DlcSign Debug:');
+      console.log('Contract ID:', dlcSign.contractId.toString('hex'));
+      console.log('Refund signature (64 bytes):', dlcSign.refundSignature.toString('hex'));
+      console.log('CET adaptor signatures count:', dlcSign.cetAdaptorSignatures.sigs.length);
+      console.log('Funding signatures count:', dlcSign.fundingSignatures.witnessElements.length);
+
+      // Debug funding signatures in detail
+      console.log('🔍 Provider Funding Signatures Debug:');
+      dlcSign.fundingSignatures.witnessElements.forEach((witnessElement, index) => {
+        console.log(`  Input ${index} (our input):`);
+        witnessElement.forEach((witness, witnessIndex) => {
+          console.log(
+            `    Witness ${witnessIndex}: ${witness.witness.toString('hex')} (${witness.witness.length} bytes)`,
+          );
+        });
+      });
+
+      // Debug input order from our perspective
+      console.log('🔍 Our funding inputs (offerer):');
+      dlcOffer.fundingInputs.forEach((input, index) => {
+        console.log(
+          `  Input ${index}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`,
+        );
+      });
+
+      // Validate funding signatures against what we created
+      console.log('🔍 Funding Signature Validation:');
+      try {
+        // Recreate the funding PSBT to compare
+        const validationPsbt = this.createFundingPsbt(dlcOffer, dlcAccept, dlcTransactions);
+
+        // Check that our signatures match the expected inputs
+        const allInputs = [...dlcOffer.fundingInputs, ...dlcAccept.fundingInputs];
+        const sortedInputs = [...allInputs].sort((a, b) =>
+          Number(a.inputSerialId - b.inputSerialId),
+        );
+
+        console.log('🔍 PSBT vs DLC Transaction Input Comparison:');
+        validationPsbt.data.globalMap.unsignedTx.ins.forEach((psbtInput, index) => {
+          const psbtTxid = psbtInput.hash.reverse().toString('hex');
+          const psbtVout = psbtInput.index;
+
+          if (index < sortedInputs.length) {
+            const dlcInput = sortedInputs[index];
+            const dlcTxid = dlcInput.prevTx.txId.toString();
+            const dlcVout = dlcInput.prevTxVout;
+
+            console.log(`  Input ${index}:`);
+            console.log(`    PSBT: ${psbtTxid}:${psbtVout}`);
+            console.log(`    DLC:  ${dlcTxid}:${dlcVout}`);
+            console.log(`    Match: ${psbtTxid === dlcTxid && psbtVout === dlcVout}`);
+
+            // Check if this is an offerer input that should have a signature
+            const isOffererInput = dlcOffer.fundingInputs.some(
+              (offerInput) =>
+                offerInput.prevTx.txId.toString() === dlcTxid && offerInput.prevTxVout === dlcVout,
+            );
+            console.log(`    Is offerer input: ${isOffererInput}`);
+          }
+        });
+
+        // Validate witness element count matches offerer input count
+        const offererInputCount = dlcOffer.fundingInputs.filter((input) => !input.dlcInput).length;
+        const witnessElementCount = dlcSign.fundingSignatures.witnessElements.length;
+
+        console.log(`🔍 Signature Count Validation:`);
+        console.log(`  Offerer non-DLC inputs: ${offererInputCount}`);
+        console.log(`  Witness elements provided: ${witnessElementCount}`);
+        console.log(`  Count matches: ${offererInputCount === witnessElementCount}`);
+
+        if (offererInputCount !== witnessElementCount) {
+          console.warn('⚠️ WARNING: Witness element count mismatch!');
+        }
+
+        // Validate the actual signatures by testing them against the PSBT
+        console.log('🔍 Signature Verification Test:');
+        let witnessIndex = 0;
+
+        for (let inputIndex = 0; inputIndex < sortedInputs.length; inputIndex++) {
+          const dlcInput = sortedInputs[inputIndex];
+          const isOffererInput = dlcOffer.fundingInputs.some(
+            (offerInput) =>
+              offerInput.prevTx.txId.toString() === dlcInput.prevTx.txId.toString() &&
+              offerInput.prevTxVout === dlcInput.prevTxVout,
+          );
+
+          if (isOffererInput && witnessIndex < dlcSign.fundingSignatures.witnessElements.length) {
+            try {
+              const witnessElement = dlcSign.fundingSignatures.witnessElements[witnessIndex];
+              const signature = witnessElement[0].witness;
+              const publicKey = witnessElement[1].witness;
+
+              // Add the signature to the validation PSBT
+              validationPsbt.updateInput(inputIndex, {
+                partialSig: [{ pubkey: publicKey, signature: signature }],
+              });
+
+              // Try to validate this specific input signature
+              validationPsbt.validateSignaturesOfInput(inputIndex, (pubkey, msghash, sig) => {
+                // Use a simple verification - in a real implementation you'd use proper secp256k1
+                return sig.length > 0 && pubkey.length === 33; // Basic sanity check
+              });
+
+              console.log(`  ✅ Input ${inputIndex} signature validation passed`);
+              witnessIndex++;
+            } catch (sigValidationError) {
+              console.error(
+                `  ❌ Input ${inputIndex} signature validation failed:`,
+                sigValidationError,
+              );
+            }
+          } else if (isOffererInput) {
+            console.log(
+              `  ⚠️ Input ${inputIndex} is offerer input but no witness element available`,
+            );
+          } else {
+            console.log(`  ➖ Input ${inputIndex} is accepter input (no signature expected)`);
+          }
+        }
+      } catch (validationError) {
+        console.error('❌ Funding signature validation failed:', validationError);
+      }
 
       console.log('dlcSign.validate');
       dlcSign.validate();

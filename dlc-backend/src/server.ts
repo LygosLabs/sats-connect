@@ -223,6 +223,38 @@ app.post('/api/dlc/finalize', async (req, res) => {
       dlcSign.fundingSignatures?.witnessElements?.length || 0
     );
 
+    // Debug funding signatures structure
+    console.log('🔍 Funding Signatures Debug:');
+    dlcSign.fundingSignatures?.witnessElements?.forEach((witnessElement, index) => {
+      console.log(`  Input ${index}:`);
+      witnessElement.forEach((witness, witnessIndex) => {
+        console.log(
+          `    Witness ${witnessIndex}: ${witness.witness.toString('hex')} (${witness.witness.length} bytes)`
+        );
+      });
+    });
+
+    // Debug offer and accept funding inputs
+    console.log('🔍 DLC Offer funding inputs:');
+    dlcState.offer.fundingInputs.forEach((input, index) => {
+      console.log(
+        `  Input ${index}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`
+      );
+    });
+
+    console.log('🔍 DLC Accept funding inputs:');
+    dlcState.accept.fundingInputs.forEach((input, index) => {
+      console.log(
+        `  Input ${index}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`
+      );
+    });
+
+    // Debug funding pubkeys
+    console.log('🔍 Funding Pubkeys:');
+    console.log('Offer funding pubkey:', dlcState.offer.fundingPubkey.toString('hex'));
+    console.log('Accept funding pubkey:', dlcState.accept.fundingPubkey.toString('hex'));
+    console.log('Sign funding pubkey (from contractId):', dlcSign.contractId.toString('hex'));
+
     // Store the sign
     dlcState.sign = dlcSign;
     dlcStore.set(contractId, dlcState);
@@ -230,16 +262,121 @@ app.post('/api/dlc/finalize', async (req, res) => {
     console.log('🔍 Calling finalizeDlcSign...');
     let fundTx;
     try {
-      // Use DDK client to finalize and broadcast
-      fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
-        dlcState.offer,
-        dlcState.accept,
-        dlcSign,
-        dlcState.transactions
-      );
+      // Add detailed debugging before finalization
+      console.log('🔍 Pre-finalize validation:');
+
+      // Check if inputs are sorted correctly
+      const allInputs = [...dlcState.offer.fundingInputs, ...dlcState.accept.fundingInputs];
+      const sortedInputs = [...allInputs].sort((a, b) => Number(a.inputSerialId - b.inputSerialId));
+
+      console.log('All inputs (original order):');
+      allInputs.forEach((input, i) => {
+        console.log(
+          `  ${i}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`
+        );
+      });
+
+      console.log('All inputs (sorted by serialId):');
+      sortedInputs.forEach((input, i) => {
+        console.log(
+          `  ${i}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`
+        );
+      });
+
+      // Check witness element count vs input count
+      const totalInputs =
+        dlcState.offer.fundingInputs.length + dlcState.accept.fundingInputs.length;
+      const witnessElementCount = dlcSign.fundingSignatures?.witnessElements?.length || 0;
+      console.log(`Total inputs: ${totalInputs}, Witness elements: ${witnessElementCount}`);
+
+      if (witnessElementCount !== dlcState.offer.fundingInputs.length) {
+        console.log('⚠️ WARNING: Witness element count does not match offerer input count');
+        console.log(`Expected: ${dlcState.offer.fundingInputs.length} (offerer inputs only)`);
+        console.log(`Got: ${witnessElementCount}`);
+      }
+
+      // Debug the funding transaction structure
+      console.log('🔍 Funding Transaction Debug:');
+      const fundingTx = dlcState.transactions.fundTx;
+      console.log(`Funding TX ID: ${fundingTx.txId.toString()}`);
+      console.log(`Funding TX inputs: ${fundingTx.inputs.length}`);
+      fundingTx.inputs.forEach((input, i) => {
+        console.log(
+          `  Input ${i}: ${input.outpoint.txid.toString()}:${input.outpoint.outputIndex}`
+        );
+      });
+      console.log(`Funding TX outputs: ${fundingTx.outputs.length}`);
+      console.log(`Fund output index: ${dlcState.transactions.fundTxVout}`);
+
+      // Use DDK client to finalize and broadcast with step-by-step debugging
+      console.log('🔍 Step 1: Calling VerifyCetAdaptorAndRefundSigs...');
+      try {
+        await bitcoinWithDdk.getMethod('VerifyCetAdaptorAndRefundSigs')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcSign,
+          dlcState.transactions,
+          [], // messagesList - will be generated internally
+          false // isOfferer = false (we're the accepter)
+        );
+        console.log('✅ Step 1: CET adaptor and refund signature verification passed');
+      } catch (step1Error) {
+        console.error('❌ Step 1: CET adaptor signature verification failed:', step1Error);
+        throw new Error(`CET verification failed: ${step1Error.message}`);
+      }
+
+      console.log('🔍 Step 2: Calling VerifyFundingSigsAlt...');
+      try {
+        await bitcoinWithDdk.getMethod('VerifyFundingSigsAlt')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcSign,
+          dlcState.transactions,
+          false // isOfferer = false (we're the accepter)
+        );
+        console.log('✅ Step 2: Funding signature verification passed');
+      } catch (step2Error) {
+        console.error('❌ Step 2: Funding signature verification failed:', step2Error);
+        throw new Error(`Funding signature verification failed: ${step2Error.message}`);
+      }
+
+      console.log('🔍 Step 3: Calling CreateFundingSigsAlt...');
+      let accepterFundingSignatures;
+      try {
+        accepterFundingSignatures = await bitcoinWithDdk.getMethod('CreateFundingSigsAlt')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcState.transactions,
+          false // isOfferer = false (we're the accepter)
+        );
+        console.log('✅ Step 3: Accepter funding signatures created');
+        console.log(
+          'Accepter witness elements count:',
+          accepterFundingSignatures.witnessElements?.length || 0
+        );
+      } catch (step3Error) {
+        console.error('❌ Step 3: Accepter funding signature creation failed:', step3Error);
+        throw new Error(`Accepter signature creation failed: ${step3Error.message}`);
+      }
+
+      console.log('🔍 Step 4: Calling CreateFundingTx...');
+      try {
+        fundTx = await bitcoinWithDdk.getMethod('CreateFundingTx')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcSign,
+          dlcState.transactions,
+          accepterFundingSignatures
+        );
+        console.log('✅ Step 4: Funding transaction created successfully');
+      } catch (step4Error) {
+        console.error('❌ Step 4: Funding transaction creation failed:', step4Error);
+        throw new Error(`Funding transaction creation failed: ${step4Error.message}`);
+      }
       console.log('✅ finalizeDlcSign completed successfully');
     } catch (finalizeError) {
       console.error('❌ finalizeDlcSign error:', finalizeError);
+      console.error('Full error stack:', finalizeError.stack);
       throw finalizeError;
     }
 
@@ -335,6 +472,68 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
     console.log('🔍 Calling finalizeDlcSign with manual messages...');
     let fundTx;
     try {
+      // Add detailed debugging before finalization
+      console.log('🔍 Manual Pre-finalize validation:');
+
+      // Check if inputs are sorted correctly
+      const allInputs = [...dlcOffer.fundingInputs, ...dlcAccept.fundingInputs];
+      const sortedInputs = [...allInputs].sort((a, b) => Number(a.inputSerialId - b.inputSerialId));
+
+      console.log('All inputs (original order):');
+      allInputs.forEach((input, i) => {
+        console.log(
+          `  ${i}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`
+        );
+      });
+
+      console.log('All inputs (sorted by serialId):');
+      sortedInputs.forEach((input, i) => {
+        console.log(
+          `  ${i}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`
+        );
+      });
+
+      // Check witness element count vs input count
+      const totalInputs = dlcOffer.fundingInputs.length + dlcAccept.fundingInputs.length;
+      const witnessElementCount = dlcSign.fundingSignatures?.witnessElements?.length || 0;
+      console.log(`Total inputs: ${totalInputs}, Witness elements: ${witnessElementCount}`);
+
+      if (witnessElementCount !== dlcOffer.fundingInputs.length) {
+        console.log('⚠️ WARNING: Witness element count does not match offerer input count');
+        console.log(`Expected: ${dlcOffer.fundingInputs.length} (offerer inputs only)`);
+        console.log(`Got: ${witnessElementCount}`);
+      }
+
+      // Debug funding signatures structure
+      console.log('🔍 Manual Funding Signatures Debug:');
+      dlcSign.fundingSignatures?.witnessElements?.forEach((witnessElement, index) => {
+        console.log(`  Input ${index}:`);
+        witnessElement.forEach((witness, witnessIndex) => {
+          console.log(
+            `    Witness ${witnessIndex}: ${witness.witness.toString('hex')} (${witness.witness.length} bytes)`
+          );
+        });
+      });
+
+      console.log('dlcTransactions', createDlcTxsResponse.dlcTransactions.fundTx.toHex());
+
+      // Validate funding signatures before finalization
+      console.log('🔍 Manual Funding Signature Validation:');
+      try {
+        await bitcoinWithDdk.getMethod('VerifyFundingSigsAlt')(
+          dlcOffer,
+          dlcAccept,
+          dlcSign,
+          createDlcTxsResponse.dlcTransactions,
+          false // isOfferer = false (we're validating offerer's signatures as accepter)
+        );
+        console.log('✅ Manual funding signature validation passed');
+      } catch (fundingSigError) {
+        console.error('❌ Manual funding signature validation failed:', fundingSigError);
+        console.error('This suggests the offerer signatures are invalid or incorrectly formatted');
+        throw new Error(`Funding signature validation failed: ${fundingSigError.message}`);
+      }
+
       // Use DDK client to finalize
       fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
         dlcOffer,
@@ -343,8 +542,115 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
         createDlcTxsResponse.dlcTransactions
       );
       console.log('✅ Manual finalizeDlcSign completed successfully');
+
+      // Debug the final transaction structure
+      console.log('🔍 Final Transaction Debug:');
+      console.log('TX ID:', fundTx.txId.serialize().toString('hex'));
+      console.log('TX Hex:', fundTx.serialize().toString('hex'));
+      console.log('Input count:', fundTx.inputs.length);
+
+      fundTx.inputs.forEach((input, index) => {
+        console.log(`Input ${index}:`);
+        console.log(`  TXID: ${input.outpoint.txid.toString()}`);
+        console.log(`  VOUT: ${input.outpoint.outputIndex}`);
+        console.log(`  Witness elements: ${input.witness.length}`);
+        input.witness.forEach((witness, wIndex) => {
+          console.log(
+            `    Witness ${wIndex}: ${witness.serialize().toString('hex')} (${witness.serialize().length} bytes)`
+          );
+        });
+      });
+
+      console.log('Output count:', fundTx.outputs.length);
+      fundTx.outputs.forEach((output, index) => {
+        console.log(`Output ${index}: ${output.value.sats} sats`);
+      });
+
+      // Validate UTXOs being spent vs signatures
+      console.log('🔍 UTXO Validation:');
+      for (let i = 0; i < fundTx.inputs.length; i++) {
+        const input = fundTx.inputs[i];
+        const txid = input.outpoint.txid.toString();
+        const vout = input.outpoint.outputIndex;
+
+        console.log(`Input ${i} UTXO check:`);
+        console.log(`  Spending: ${txid}:${vout}`);
+
+        try {
+          // Fetch the actual UTXO from mempool.space to verify it exists and matches
+          const utxoResponse = await fetch(`https://mempool.space/testnet/api/tx/${txid}`);
+          if (utxoResponse.ok) {
+            const utxoData = await utxoResponse.json();
+            const actualOutput = utxoData.vout[vout];
+
+            if (actualOutput) {
+              console.log(`  ✅ UTXO exists: ${actualOutput.value} sats`);
+              console.log(`  Script type: ${actualOutput.scriptpubkey_type}`);
+              console.log(`  Script: ${actualOutput.scriptpubkey}`);
+
+              // Validate pubkey hash matches script
+              if (actualOutput.scriptpubkey_type === 'v0_p2wpkh') {
+                const scriptHex = actualOutput.scriptpubkey;
+                // P2WPKH script: 0014 + 20-byte pubkey hash
+                if (scriptHex.length === 44 && scriptHex.startsWith('0014')) {
+                  const expectedPubkeyHash = scriptHex.slice(4); // Remove 0014 prefix
+
+                  // Get the actual pubkey from witness
+                  const witnessElements = input.witness;
+                  if (witnessElements.length >= 2) {
+                    const pubkeyFromWitness = witnessElements[1]
+                      .serialize()
+                      .toString('hex')
+                      .slice(2); // Remove length prefix
+
+                    // Calculate hash160 of the pubkey
+                    const crypto = require('crypto');
+                    const pubkeyBuffer = Buffer.from(pubkeyFromWitness, 'hex');
+                    const sha256Hash = crypto.createHash('sha256').update(pubkeyBuffer).digest();
+                    const ripemd160Hash = crypto
+                      .createHash('ripemd160')
+                      .update(sha256Hash)
+                      .digest();
+                    const calculatedHash = ripemd160Hash.toString('hex');
+
+                    console.log(`  Expected pubkey hash: ${expectedPubkeyHash}`);
+                    console.log(`  Witness pubkey: ${pubkeyFromWitness}`);
+                    console.log(`  Calculated hash: ${calculatedHash}`);
+                    console.log(`  Hash matches: ${calculatedHash === expectedPubkeyHash}`);
+
+                    if (calculatedHash !== expectedPubkeyHash) {
+                      console.log(
+                        `  ❌ PUBKEY HASH MISMATCH! This is likely the cause of OP_EQUALVERIFY failure`
+                      );
+                    }
+                  }
+                }
+              }
+
+              // Check if it's unspent
+              const utxoStatusResponse = await fetch(
+                `https://mempool.space/testnet/api/tx/${txid}/outspend/${vout}`
+              );
+              if (utxoStatusResponse.ok) {
+                const utxoStatus = await utxoStatusResponse.json();
+                console.log(`  Spent: ${utxoStatus.spent ? 'YES' : 'NO'}`);
+                if (utxoStatus.spent) {
+                  console.log(`  ⚠️ WARNING: UTXO already spent in tx: ${utxoStatus.txid}`);
+                }
+              }
+            } else {
+              console.log(`  ❌ UTXO output ${vout} not found in transaction`);
+            }
+          } else {
+            console.log(`  ❌ Failed to fetch UTXO data: ${utxoResponse.status}`);
+          }
+        } catch (utxoError) {
+          console.log(`  ❌ Error checking UTXO: ${utxoError.message}`);
+        }
+      }
     } catch (finalizeError) {
       console.error('❌ Manual finalizeDlcSign error:', finalizeError);
+      console.error('Full error stack:', finalizeError.stack);
       throw finalizeError;
     }
 
@@ -408,7 +714,8 @@ app.post('/api/dlc/broadcast', async (req, res) => {
     }
 
     // Use Esplora API to broadcast the transaction
-    const broadcastResponse = await fetch(`${esploraProvider.url}/tx`, {
+    const esploraUrl = 'https://mempool.space/testnet/api';
+    const broadcastResponse = await fetch(`${esploraUrl}/tx`, {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain',
