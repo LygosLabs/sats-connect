@@ -587,14 +587,24 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
           // Extract signature from partialSig array
           const partialSig = input.partialSig[0];
           const signature = partialSig.signature;
+          const publicKey = partialSig.pubkey;
 
           // Create ScriptWitnessV0 object for the signature
-          const witnessElement = new ScriptWitnessV0();
-          witnessElement.witness = signature;
-          witnessElement.length = signature.length;
+          const signatureWitness = new ScriptWitnessV0();
+          signatureWitness.witness = signature;
+          signatureWitness.length = signature.length;
 
-          // Create witness element array for this input
-          witnessElements.push([witnessElement]);
+          // Create ScriptWitnessV0 object for the public key
+          const publicKeyWitness = new ScriptWitnessV0();
+          publicKeyWitness.witness = publicKey;
+          publicKeyWitness.length = publicKey.length;
+
+          // Create witness element array for this input: [signature, publicKey]
+          witnessElements.push([signatureWitness, publicKeyWitness]);
+
+          console.log(`Funding input ${inputIndex} witness elements:`);
+          console.log(`  Signature: ${signature.toString('hex')} (${signature.length} bytes)`);
+          console.log(`  Public Key: ${publicKey.toString('hex')} (${publicKey.length} bytes)`);
         }
       }
 
@@ -675,9 +685,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       console.log('dlcSign.validate');
       dlcSign.validate();
       console.log('dlcSign.serialize');
-      dlcSign.serialize();
+      console.log('dlcSign.serialize', dlcSign.serialize().toString('hex'));
       console.log('dlcSign.toJSON');
-      dlcSign.toJSON();
+      console.log('dlcSign.toJSON', dlcSign.toJSON());
 
       return dlcSign;
     } catch (error: unknown) {
