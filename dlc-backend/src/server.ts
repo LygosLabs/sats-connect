@@ -517,6 +517,26 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
 
       console.log('dlcTransactions', createDlcTxsResponse.dlcTransactions.fundTx.toHex());
 
+      // Debug sighashes for all funding transaction inputs with details
+      console.log('🔍 Funding Transaction Sighash Details:');
+      try {
+        const sighashDetails = await bitcoinWithDdk.getMethod(
+          'getFundingTransactionSighashDetails'
+        )(dlcOffer, dlcAccept, createDlcTxsResponse.dlcTransactions);
+
+        sighashDetails.forEach((detail) => {
+          console.log(`  Input ${detail.inputIndex}:`);
+          console.log(`    TXID: ${detail.txid}:${detail.vout}`);
+          console.log(`    Sequence: ${detail.sequence}`);
+          console.log(`    Script: ${detail.scriptPubKey}`);
+          console.log(`    Value: ${detail.value} sats`);
+          console.log(`    Sighash: ${detail.sighash}`);
+          console.log('    ---');
+        });
+      } catch (sighashError) {
+        console.error('❌ Failed to get sighash details:', sighashError);
+      }
+
       // Validate funding signatures before finalization
       console.log('🔍 Manual Funding Signature Validation:');
       try {
