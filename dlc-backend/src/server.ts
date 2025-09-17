@@ -214,17 +214,34 @@ app.post('/api/dlc/finalize', async (req, res) => {
     // Deserialize the DLC sign
     const dlcSign = DlcSign.deserialize(Buffer.from(dlcSignHex, 'hex'));
 
+    console.log('🔍 DLC Sign Debug Info:');
+    console.log('Contract ID:', dlcSign.contractId.toString('hex'));
+    console.log('Refund signature length:', dlcSign.refundSignature.length);
+    console.log('CET adaptor signatures count:', dlcSign.cetAdaptorSignatures?.sigs?.length || 0);
+    console.log(
+      'Funding signatures count:',
+      dlcSign.fundingSignatures?.witnessElements?.length || 0
+    );
+
     // Store the sign
     dlcState.sign = dlcSign;
     dlcStore.set(contractId, dlcState);
 
-    // Use DDK client to finalize and broadcast
-    const fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
-      dlcState.offer,
-      dlcState.accept,
-      dlcSign,
-      dlcState.transactions
-    );
+    console.log('🔍 Calling finalizeDlcSign...');
+    let fundTx;
+    try {
+      // Use DDK client to finalize and broadcast
+      fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
+        dlcState.offer,
+        dlcState.accept,
+        dlcSign,
+        dlcState.transactions
+      );
+      console.log('✅ finalizeDlcSign completed successfully');
+    } catch (finalizeError) {
+      console.error('❌ finalizeDlcSign error:', finalizeError);
+      throw finalizeError;
+    }
 
     // TODO: Add actual broadcasting when connected to Bitcoin node
     // For now, just return the transaction hex

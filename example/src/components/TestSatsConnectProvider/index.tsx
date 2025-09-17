@@ -133,11 +133,14 @@ export function TestSatsConnectProvider() {
         if (dlcOffer && dlcSign && dlcAcceptHex) {
           console.log('=== DLC MESSAGES JSON OUTPUT ===');
           console.log('DLC Offer JSON:', JSON.stringify(dlcOffer.toJSON(), null, 2));
+          console.log('DLC Offer Hex:', dlcOffer.serialize().toString('hex'));
 
           const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
           console.log('DLC Accept JSON:', JSON.stringify(dlcAccept.toJSON(), null, 2));
+          console.log('DLC Accept Hex:', dlcAccept.serialize().toString('hex'));
 
           console.log('DLC Sign JSON:', JSON.stringify(dlcSign.toJSON(), null, 2));
+          console.log('DLC Sign Hex:', dlcSign.serialize().toString('hex'));
           console.log('=== END DLC MESSAGES ===');
         }
 
