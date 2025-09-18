@@ -533,6 +533,27 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
           console.log(`    Sighash: ${detail.sighash}`);
           console.log('    ---');
         });
+
+        // Debug the actual transaction structure used for sighash calculation
+        console.log('🔍 Transaction Structure for Sighash:');
+        const fundingTx = createDlcTxsResponse.dlcTransactions.fundTx;
+        console.log(`  Version: ${fundingTx.version}`);
+        console.log(`  Locktime: ${fundingTx.locktime.toString()}`);
+        console.log(`  Input count: ${fundingTx.inputs.length}`);
+
+        fundingTx.inputs.forEach((input, i) => {
+          console.log(`  Input ${i}:`);
+          console.log(`    Hash: ${input.outpoint.txid.toString()}`);
+          console.log(`    Index: ${input.outpoint.outputIndex}`);
+          console.log(`    Sequence: ${input.sequence.toString()}`);
+        });
+
+        console.log(`  Output count: ${fundingTx.outputs.length}`);
+        fundingTx.outputs.forEach((output, i) => {
+          console.log(`  Output ${i}:`);
+          console.log(`    Value: ${output.value.sats} sats`);
+          console.log(`    Script: ${output.scriptPubKey.serialize().toString('hex')}`);
+        });
       } catch (sighashError) {
         console.error('❌ Failed to get sighash details:', sighashError);
       }
