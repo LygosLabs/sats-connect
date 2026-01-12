@@ -17,9 +17,9 @@
     "prepare": "cd .. && npm i && npm run build && cd example"
   },
   "dependencies": {
-    "@atomicfinance/bitcoin-js-wallet-provider": "^4.1.9",
-    "@atomicfinance/provider": "^4.1.9",
-    "@atomicfinance/types": "^4.1.9",
+    "@atomicfinance/bitcoin-js-wallet-provider": "^4.2.0",
+    "@atomicfinance/provider": "^4.2.0",
+    "@atomicfinance/types": "^4.2.0",
     "@mantine/core": "^8.2.1",
     "@mantine/hooks": "^8.2.1",
     "@node-dlc/bufio": "^1.1.0",

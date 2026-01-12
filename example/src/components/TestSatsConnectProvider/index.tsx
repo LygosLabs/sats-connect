@@ -14,16 +14,30 @@ import { BitcoinSatsConnectProvider, type SatsConnectAddress } from '../../provi
 import { ErrorMessage } from '../common';
 
 export function TestSatsConnectProvider() {
+  // const contractInfo = SingleContractInfo.deserialize(
+  //   Buffer.from(
+  //     '0000000000000f42400003406136306135323338326437303737373132646566326136396564613362613330396231393539383934346161343539636534313861653533623766623564353800000000000186a0406635353639313930356561396439373635343039303361343638366164343964363535313830333361326438666338383038636135356465326532366532393200000000000000004030323536366564356634313439336332616462366464643562333064623262663831656538633938373362383730373234343934663130366163663532646138000000000000c35000fdd824b560d34dce7dc02b263e12e285ed66b00dcf0b67ca5f02386fe14fbce7d9b5b54337868b49b6d829b63227c4e10fe86b24f4b42b187765c29352ff2cd667a951233a5c57eaced9c70b42c8beaa5d5fad430bd351f82d52b375bcab430699be8a8bfdd82251000160d34dce7dc02b263e12e285ed66b00dcf0b67ca5f02386fe14fbce7d9b5b5436064108cfdd806170003057472756d70066b616d616c61076e6569746865720f7472756d702d76732d6b616d616c61',
+  //     'hex',
+  //   ),
+  // );
+  // contractInfo.totalCollateral = BigInt(100000);
+  // const oracleAttestation = OracleAttestation.deserialize(
+  //   Buffer.from(
+  //     'fdd8687a0f7472756d702d76732d6b616d616c613a5c57eaced9c70b42c8beaa5d5fad430bd351f82d52b375bcab430699be8a8b000160d34dce7dc02b263e12e285ed66b00dcf0b67ca5f02386fe14fbce7d9b5b543b5810f69116f4b7924ebca4a02dca743cdb2ff9d261676d641ee17a7603d51fb0001057472756d70',
+  //     'hex',
+  //   ),
+  // );
+
   const contractInfo = SingleContractInfo.deserialize(
     Buffer.from(
-      '0000000000000f42400003406136306135323338326437303737373132646566326136396564613362613330396231393539383934346161343539636534313861653533623766623564353800000000000186a0406635353639313930356561396439373635343039303361343638366164343964363535313830333361326438666338383038636135356465326532366532393200000000000000004030323536366564356634313439336332616462366464643562333064623262663831656538633938373362383730373234343934663130366163663532646138000000000000c35000fdd824b560d34dce7dc02b263e12e285ed66b00dcf0b67ca5f02386fe14fbce7d9b5b54337868b49b6d829b63227c4e10fe86b24f4b42b187765c29352ff2cd667a951233a5c57eaced9c70b42c8beaa5d5fad430bd351f82d52b375bcab430699be8a8bfdd82251000160d34dce7dc02b263e12e285ed66b00dcf0b67ca5f02386fe14fbce7d9b5b5436064108cfdd806170003057472756d70066b616d616c61076e6569746865720f7472756d702d76732d6b616d616c61',
+      '0000000000000186a00003406136306135323338326437303737373132646566326136396564613362613330396231393539383934346161343539636534313861653533623766623564353800000000000186a0406635353639313930356561396439373635343039303361343638366164343964363535313830333361326438666338383038636135356465326532366532393200000000000000004030323536366564356634313439336332616462366464643562333064623262663831656538633938373362383730373234343934663130366163663532646138000000000000c35000fdd824b5328684dd21718ceda26369cbd6b807082c90b6e43529e4b6a8b52541fe050182748dfd8cda01f12d9df6fe11a5d45f4140c1a532ae664e0fa2eb61643776b4efd2c9c4adccbdad291dc2d3d25b5a1e5650c0e3840bc30aa54f0035bc7fc614a5fdd822510001328684dd21718ceda26369cbd6b807082c90b6e43529e4b6a8b52541fe0501826064108cfdd806170003057472756d70066b616d616c61076e6569746865720f7472756d702d76732d6b616d616c61',
       'hex',
     ),
   );
   contractInfo.totalCollateral = BigInt(100000);
   const oracleAttestation = OracleAttestation.deserialize(
     Buffer.from(
-      'fdd8687a0f7472756d702d76732d6b616d616c613a5c57eaced9c70b42c8beaa5d5fad430bd351f82d52b375bcab430699be8a8b000160d34dce7dc02b263e12e285ed66b00dcf0b67ca5f02386fe14fbce7d9b5b543b5810f69116f4b7924ebca4a02dca743cdb2ff9d261676d641ee17a7603d51fb0001057472756d70',
+      'fdd8687a0f7472756d702d76732d6b616d616c61d2c9c4adccbdad291dc2d3d25b5a1e5650c0e3840bc30aa54f0035bc7fc614a50001328684dd21718ceda26369cbd6b807082c90b6e43529e4b6a8b52541fe0501829f476ff965b7f21549e336ba517c9608dcedf894a4b4818d04cd52241aace18d0001057472756d70',
       'hex',
     ),
   );
@@ -74,6 +88,11 @@ export function TestSatsConnectProvider() {
       let adaptorPoints: string[] | null = null;
 
       try {
+        // Log contractInfo being used
+        console.log('🔍 ContractInfo being used:');
+        console.log('  Total collateral:', contractInfo.totalCollateral.toString(), 'sats');
+        console.log('  Serialized:', contractInfo.serialize().toString('hex'));
+
         // Step 1: Create DLC offer using SatsConnect provider
         dlcOffer = await provider.createDlcOffer(
           contractInfo,
@@ -86,7 +105,7 @@ export function TestSatsConnectProvider() {
         console.log('DLC offer:', dlcOffer);
 
         // Step 2: Send DLC offer to backend for acceptance using DDK
-        const backendResponse = await fetch('http://localhost:3001/api/dlc/accept', {
+        const backendResponse = await fetch('http://localhost:3005/api/dlc/accept', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -174,7 +193,7 @@ export function TestSatsConnectProvider() {
     setFinalizeState({ isLoading: true });
 
     try {
-      const response = await fetch('http://localhost:3001/api/dlc/finalize', {
+      const response = await fetch('http://localhost:3005/api/dlc/finalize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -213,7 +232,7 @@ export function TestSatsConnectProvider() {
     setBroadcastState({ isLoading: true });
 
     try {
-      const response = await fetch('http://localhost:3001/api/dlc/broadcast', {
+      const response = await fetch('http://localhost:3005/api/dlc/broadcast', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -246,7 +265,7 @@ export function TestSatsConnectProvider() {
     setExecuteState({ isLoading: true });
 
     try {
-      const response = await fetch('http://localhost:3001/api/dlc/execute', {
+      const response = await fetch('http://localhost:3005/api/dlc/execute', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -288,7 +307,7 @@ export function TestSatsConnectProvider() {
     setExecuteBroadcastState({ isLoading: true });
 
     try {
-      const response = await fetch('http://localhost:3001/api/dlc/broadcast', {
+      const response = await fetch('http://localhost:3005/api/dlc/broadcast', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -456,7 +475,7 @@ export function TestSatsConnectProvider() {
                           <strong>Oracle Pubkey:</strong>{' '}
                           {(
                             contractInfo.oracleInfo as SingleOracleInfo
-                          ).announcement.oraclePubkey.toString('hex')}
+                          ).announcement.oraclePublicKey.toString('hex')}
                         </div>
                       </div>
                     </div>
@@ -567,7 +586,7 @@ export function TestSatsConnectProvider() {
                             >
                               <Button
                                 onClick={() => {
-                                  const offerHex = data.dlcOffer?.serialize().toString('hex');
+                                  const offerHex = data.dlcOffer?.serialize()?.toString('hex');
                                   if (offerHex) {
                                     navigator.clipboard.writeText(offerHex).catch(console.error);
                                     alert('DLC Offer hex copied to clipboard!');
@@ -592,7 +611,7 @@ export function TestSatsConnectProvider() {
                               </Button>
                               <Button
                                 onClick={() => {
-                                  const signHex = data.dlcSign?.serialize().toString('hex');
+                                  const signHex = data.dlcSign?.serialize()?.toString('hex');
                                   if (signHex) {
                                     navigator.clipboard.writeText(signHex).catch(console.error);
                                     alert('DLC Sign hex copied to clipboard!');
@@ -770,6 +789,7 @@ export function TestSatsConnectProvider() {
                               <strong>✅ Transaction Finalized!</strong>
                               <div style={{ fontSize: '0.8em', marginTop: '0.25rem' }}>
                                 TX ID: {finalizeState.txId}
+                                TX Hex: {finalizeState.txHex}
                               </div>
                             </div>
                           )}
@@ -885,7 +905,7 @@ export function TestSatsConnectProvider() {
                         </div>
                         <div>
                           <strong>Oracle Pubkey:</strong>{' '}
-                          {oracleAttestation.oraclePubkey.toString('hex')}
+                          {oracleAttestation.oraclePublicKey.toString('hex')}
                         </div>
                         <div>
                           <strong>Outcomes:</strong> {oracleAttestation.outcomes.join(', ')}

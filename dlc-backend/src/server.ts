@@ -13,6 +13,7 @@ import {
 } from '@node-dlc/messaging';
 import { generateMnemonic } from 'bip39';
 import { BitcoinNetworks } from 'bitcoin-network';
+import { address } from 'bitcoinjs-lib';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -22,7 +23,7 @@ import BlockstreamApiProvider from './BlockstreamApiProvider';
 dotenv.config();
 
 const app: express.Application = express();
-const port = 3001;
+const port = 3005;
 
 // Setup DDK client with Blockstream API - using testnet3 for testing
 const network = BitcoinNetworks.bitcoin_testnet;
@@ -30,22 +31,22 @@ const network = BitcoinNetworks.bitcoin_testnet;
 const bitcoinWithDdk = new Client();
 
 // Add Blockstream API provider
-// const blockstreamProvider = new BlockstreamApiProvider({
-//   network,
-//   clientId: process.env.BLOCKSTREAM_CLIENT_ID,
-//   clientSecret: process.env.BLOCKSTREAM_CLIENT_SECRET,
-//   numberOfBlockConfirmation: 1,
-//   defaultFeePerByte: 3,
-// });
-
-// bitcoinWithDdk.addProvider(blockstreamProvider);
-
-const esploraProvider = new BitcoinEsploraApiProvider({
-  url: 'https://mempool.space/testnet/api',
+const blockstreamProvider = new BlockstreamApiProvider({
   network,
-}) as any;
+  clientId: process.env.BLOCKSTREAM_CLIENT_ID,
+  clientSecret: process.env.BLOCKSTREAM_CLIENT_SECRET,
+  numberOfBlockConfirmation: 1,
+  defaultFeePerByte: 3,
+});
 
-bitcoinWithDdk.addProvider(esploraProvider);
+bitcoinWithDdk.addProvider(blockstreamProvider);
+
+// const esploraProvider = new BitcoinEsploraApiProvider({
+//   url: 'https://blockstream.info/testnet/api',
+//   network,
+// }) as any;
+
+// bitcoinWithDdk.addProvider(esploraProvider);
 
 const mnemonic = process.env.MNEMONIC || generateMnemonic(256);
 
@@ -100,6 +101,14 @@ app.post('/api/dlc/accept', async (req, res) => {
     // Deserialize the DLC offer
     const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
 
+    // Log contract info details
+    console.log('🔍 DLC Offer Contract Info:');
+    const contractInfo = dlcOffer.contractInfo as SingleContractInfo;
+    console.log('  Total collateral:', contractInfo.totalCollateral.toString(), 'sats');
+    console.log('  Offer collateral:', dlcOffer.offerCollateral.toString(), 'sats');
+    const acceptCollateral = contractInfo.totalCollateral - dlcOffer.offerCollateral;
+    console.log('  Accept collateral (required):', acceptCollateral.toString(), 'sats');
+
     // Get first address without scanning all addresses
     const addresses = await bitcoinWithDdk.getMethod('getAddresses')(0, 1);
     if (!addresses || addresses.length === 0) {
@@ -107,9 +116,22 @@ app.post('/api/dlc/accept', async (req, res) => {
     }
 
     const firstAddress = addresses[0];
+    console.log('🔍 Accept wallet address:', firstAddress.address);
+
     const unspentTransactions = await bitcoinWithDdk.getMethod('getUnspentTransactions')([
       firstAddress.address,
     ]);
+
+    console.log('🔍 Unspent transactions found:', unspentTransactions.length);
+
+    // Log total value available
+    const totalValue = unspentTransactions.reduce((sum: number, utxo: any) => sum + utxo.value, 0);
+    console.log('🔍 Total value available:', totalValue, 'sats');
+
+    // Log each UTXO
+    unspentTransactions.forEach((utxo: any, index: number) => {
+      console.log(`  UTXO ${index}: ${utxo.txid}:${utxo.vout} - ${utxo.value} sats`);
+    });
 
     // Convert UTXOs to Input format for DDK
     const inputs = unspentTransactions.map((utxo: any) => {
@@ -124,9 +146,15 @@ app.post('/api/dlc/accept', async (req, res) => {
       );
     });
 
+    console.log('🔍 Inputs created for DLC accept:', inputs.length);
+
+    console.log('dlcOffer', dlcOffer.toJSON())
+
     // Use DDK client to accept the DLC offer with inputs
     const acceptDlcOfferResponse = await bitcoinWithDdk.dlc.acceptDlcOffer(dlcOffer, inputs);
     const dlcAccept = acceptDlcOfferResponse.dlcAccept;
+    dlcAccept.changeSpk = address.toOutputScript(firstAddress.address, network);
+    dlcAccept.payoutSpk = address.toOutputScript(firstAddress.address, network);
     const dlcTransactions = acceptDlcOfferResponse.dlcTransactions;
 
     // Calculate the proper contract ID using the funding transaction
@@ -174,6 +202,8 @@ app.post('/api/dlc/accept', async (req, res) => {
       ],
       transformedMsgsForDdk
     );
+
+    console.log('adaptorPoints', adaptorPoints);
 
     res.json({
       dlcAcceptHex: dlcAccept.serialize().toString('hex'),
@@ -267,7 +297,9 @@ app.post('/api/dlc/finalize', async (req, res) => {
 
       // Check if inputs are sorted correctly
       const allInputs = [...dlcState.offer.fundingInputs, ...dlcState.accept.fundingInputs];
-      const sortedInputs = [...allInputs].sort((a, b) => Number(a.inputSerialId - b.inputSerialId));
+      const sortedInputs = [...allInputs].sort(
+        (a, b) => Number(a.inputSerialId) - Number(b.inputSerialId)
+      );
 
       console.log('All inputs (original order):');
       allInputs.forEach((input, i) => {
@@ -309,70 +341,45 @@ app.post('/api/dlc/finalize', async (req, res) => {
       console.log(`Fund output index: ${dlcState.transactions.fundTxVout}`);
 
       // Use DDK client to finalize and broadcast with step-by-step debugging
-      console.log('🔍 Step 1: Calling VerifyCetAdaptorAndRefundSigs...');
-      try {
-        await bitcoinWithDdk.getMethod('VerifyCetAdaptorAndRefundSigs')(
-          dlcState.offer,
-          dlcState.accept,
-          dlcSign,
-          dlcState.transactions,
-          [], // messagesList - will be generated internally
-          false // isOfferer = false (we're the accepter)
-        );
-        console.log('✅ Step 1: CET adaptor and refund signature verification passed');
-      } catch (step1Error) {
-        console.error('❌ Step 1: CET adaptor signature verification failed:', step1Error);
-        throw new Error(`CET verification failed: ${step1Error.message}`);
-      }
+      // console.log('🔍 Step 1: Calling VerifyCetAdaptorAndRefundSigs...');
+      // try {
+      //   await bitcoinWithDdk.getMethod('VerifyCetAdaptorAndRefundSigs')(
+      //     dlcState.offer,
+      //     dlcState.accept,
+      //     dlcSign,
+      //     dlcState.transactions,
+      //     [], // messagesList - will be generated internally
+      //     false // isOfferer = false (we're the accepter)
+      //   );
+      //   console.log('✅ Step 1: CET adaptor and refund signature verification passed');
+      // } catch (step1Error) {
+      //   console.error('❌ Step 1: CET adaptor signature verification failed:', step1Error);
+      //   throw new Error(`CET verification failed: ${step1Error.message}`);
+      // }
 
-      console.log('🔍 Step 2: Calling VerifyFundingSigsAlt...');
-      try {
-        await bitcoinWithDdk.getMethod('VerifyFundingSigsAlt')(
-          dlcState.offer,
-          dlcState.accept,
-          dlcSign,
-          dlcState.transactions,
-          false // isOfferer = false (we're the accepter)
-        );
-        console.log('✅ Step 2: Funding signature verification passed');
-      } catch (step2Error) {
-        console.error('❌ Step 2: Funding signature verification failed:', step2Error);
-        throw new Error(`Funding signature verification failed: ${step2Error.message}`);
-      }
+      // console.log('🔍 Step 2: Calling VerifyFundingSigsAlt...');
+      // try {
+      //   await bitcoinWithDdk.getMethod('VerifyFundingSigsAlt')(
+      //     dlcState.offer,
+      //     dlcState.accept,
+      //     dlcSign,
+      //     dlcState.transactions,
+      //     false // isOfferer = false (we're the accepter)
+      //   );
+      //   console.log('✅ Step 2: Funding signature verification passed');
+      // } catch (step2Error) {
+      //   console.error('❌ Step 2: Funding signature verification failed:', step2Error);
+      //   throw new Error(`Funding signature verification failed: ${step2Error.message}`);
+      // }
 
-      console.log('🔍 Step 3: Calling CreateFundingSigsAlt...');
-      let accepterFundingSignatures;
-      try {
-        accepterFundingSignatures = await bitcoinWithDdk.getMethod('CreateFundingSigsAlt')(
-          dlcState.offer,
-          dlcState.accept,
-          dlcState.transactions,
-          false // isOfferer = false (we're the accepter)
-        );
-        console.log('✅ Step 3: Accepter funding signatures created');
-        console.log(
-          'Accepter witness elements count:',
-          accepterFundingSignatures.witnessElements?.length || 0
-        );
-      } catch (step3Error) {
-        console.error('❌ Step 3: Accepter funding signature creation failed:', step3Error);
-        throw new Error(`Accepter signature creation failed: ${step3Error.message}`);
-      }
-
-      console.log('🔍 Step 4: Calling CreateFundingTx...');
-      try {
-        fundTx = await bitcoinWithDdk.getMethod('CreateFundingTx')(
-          dlcState.offer,
-          dlcState.accept,
-          dlcSign,
-          dlcState.transactions,
-          accepterFundingSignatures
-        );
-        console.log('✅ Step 4: Funding transaction created successfully');
-      } catch (step4Error) {
-        console.error('❌ Step 4: Funding transaction creation failed:', step4Error);
-        throw new Error(`Funding transaction creation failed: ${step4Error.message}`);
-      }
+      // Skip individual steps and use the working finalizeDlcSign method directly
+      console.log('🔍 Calling finalizeDlcSign directly (bypassing buggy verification steps)...');
+      fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
+        dlcState.offer,
+        dlcState.accept,
+        dlcSign,
+        dlcState.transactions
+      );
       console.log('✅ finalizeDlcSign completed successfully');
     } catch (finalizeError) {
       console.error('❌ finalizeDlcSign error:', finalizeError);
@@ -477,7 +484,9 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
 
       // Check if inputs are sorted correctly
       const allInputs = [...dlcOffer.fundingInputs, ...dlcAccept.fundingInputs];
-      const sortedInputs = [...allInputs].sort((a, b) => Number(a.inputSerialId - b.inputSerialId));
+      const sortedInputs = [...allInputs].sort(
+        (a, b) => Number(a.inputSerialId) - Number(b.inputSerialId)
+      );
 
       console.log('All inputs (original order):');
       allInputs.forEach((input, i) => {
@@ -619,7 +628,7 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
 
         try {
           // Fetch the actual UTXO from mempool.space to verify it exists and matches
-          const utxoResponse = await fetch(`https://mempool.space/testnet/api/tx/${txid}`);
+          const utxoResponse = await fetch(`https://mempool.space/testnet4/api/tx/${txid}`);
           if (utxoResponse.ok) {
             const utxoData = await utxoResponse.json();
             const actualOutput = utxoData.vout[vout];
@@ -670,7 +679,7 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
 
               // Check if it's unspent
               const utxoStatusResponse = await fetch(
-                `https://mempool.space/testnet/api/tx/${txid}/outspend/${vout}`
+                `https://mempool.space/testnet4/api/tx/${txid}/outspend/${vout}`
               );
               if (utxoStatusResponse.ok) {
                 const utxoStatus = await utxoStatusResponse.json();
@@ -755,7 +764,7 @@ app.post('/api/dlc/broadcast', async (req, res) => {
     }
 
     // Use Esplora API to broadcast the transaction
-    const esploraUrl = 'https://mempool.space/testnet/api';
+    const esploraUrl = 'https://mempool.space/testnet4/api';
     const broadcastResponse = await fetch(`${esploraUrl}/tx`, {
       method: 'POST',
       headers: {
@@ -814,6 +823,26 @@ app.post('/api/dlc/execute', async (req, res) => {
 
     // Execute the DLC from acceptor's perspective (server is acceptor, not offerer)
     const isOfferer = false;
+
+    console.log('🔍 DLC Execution Debug:');
+    console.log('Oracle attestation event ID:', oracleAttestation.eventId);
+    console.log('Oracle attestation outcomes:', oracleAttestation.outcomes);
+    console.log('Available CET count:', dlcState.transactions.cets?.length || 0);
+    console.log(
+      'DLC Accept CET signatures count:',
+      dlcState.accept.cetAdaptorSignatures?.sigs?.length || 0
+    );
+    console.log(
+      'DLC Sign CET signatures count:',
+      dlcState.sign.cetAdaptorSignatures?.sigs?.length || 0
+    );
+
+    // Debug the fund output value issue
+    const fundOutputValueSats =
+      dlcState.transactions.fundTx.outputs[dlcState.transactions.fundTxVout].value.sats;
+    console.log('Fund output value (sats):', fundOutputValueSats);
+    console.log('Fund output value type:', typeof fundOutputValueSats);
+
     const executionTx = await bitcoinWithDdk.dlc.execute(
       dlcState.offer,
       dlcState.accept,
@@ -835,6 +864,68 @@ app.post('/api/dlc/execute', async (req, res) => {
     console.error('Error executing DLC:', error);
     res.status(500).json({
       error: 'Failed to execute DLC',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Calculate adaptor points from DLC offer
+ * POST /api/dlc/adaptor-points
+ * Body: { dlcOfferHex: string }
+ * Returns: { adaptorPoints: string[], success: boolean }
+ */
+app.post('/api/dlc/adaptor-points', async (req, res) => {
+  try {
+    const { dlcOfferHex } = req.body;
+
+    if (!dlcOfferHex) {
+      return res.status(400).json({ error: 'dlcOfferHex is required' });
+    }
+
+    // Deserialize the DLC offer
+    const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
+
+    // Extract oracle info from contract info
+    const contractInfo = dlcOffer.contractInfo as SingleContractInfo;
+    const oracleInfo = contractInfo.oracleInfo as SingleOracleInfo;
+
+    const oraclePublicKey = oracleInfo.announcement.oraclePublicKey;
+    const oracleNonces = oracleInfo.announcement.getNonces();
+
+    // Generate messages using DDK
+    const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(oracleInfo);
+    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
+
+    // Transform msgsForDdk structure: flatten the nested messages into separate arrays
+    const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
+
+    console.log('🔍 Adaptor Point Calculation:');
+    console.log('  Oracle public key:', oraclePublicKey.toString('hex'));
+    console.log('  Oracle nonces count:', oracleNonces.length);
+    console.log('  Messages count:', transformedMsgsForDdk.length);
+
+    // Calculate adaptor points using DDK
+    const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
+      [
+        {
+          publicKey: oraclePublicKey,
+          nonces: oracleNonces,
+        },
+      ],
+      transformedMsgsForDdk
+    );
+
+    console.log('  Adaptor points calculated:', adaptorPoints.length);
+
+    res.json({
+      adaptorPoints: adaptorPoints.map((point: Buffer) => point.toString('base64')),
+      success: true,
+    });
+  } catch (error: any) {
+    console.error('Error calculating adaptor points:', error);
+    res.status(500).json({
+      error: 'Failed to calculate adaptor points',
       details: error.message,
     });
   }

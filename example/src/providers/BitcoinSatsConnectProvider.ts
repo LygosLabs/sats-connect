@@ -9,17 +9,13 @@ import {
   DlcOffer,
   DlcSign,
   DlcTransactions,
-  EnumeratedDescriptor,
   FundingInput,
   FundingSignatures,
   ScriptWitnessV0,
-  SingleContractInfo,
-  SingleOracleInfo,
 } from '@node-dlc/messaging';
 import { BitcoinNetwork, BitcoinNetworks } from 'bitcoin-network';
 import { Psbt, address, Transaction as btTransaction, payments } from 'bitcoinjs-lib';
 import Wallet, { AddressPurpose } from 'sats-connect';
-import { createAdaptorPoint } from 'schnorr-adaptor-points';
 
 // Additional types we need
 export interface Input {
@@ -74,7 +70,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
   constructor(options: BitcoinSatsConnectProviderOptions = {}) {
     super();
     this.wallet = Wallet;
-    this.esploraUrl = options.esploraUrl ?? 'https://mempool.space/testnet/api';
+    this.esploraUrl = options.esploraUrl ?? 'https://mempool.space/testnet4/api';
     this.network = options.network ?? BitcoinNetworks.bitcoin_testnet;
   }
 
@@ -238,9 +234,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       dlcOffer.refundLocktime = refundLocktime;
       dlcOffer.contractFlags = Buffer.from('00', 'hex');
       dlcOffer.chainHash = Buffer.from(
-        '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f',
+        '00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043',
         'hex',
-      ); // Bitcoin mainnet
+      ); // Bitcoin testnet4
 
       return dlcOffer;
     } catch (error: unknown) {
@@ -269,15 +265,12 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
   }
 
   /**
-   * Helper function to convert address to script pubkey (simplified)
+   * Helper function to convert address to script pubkey
    * @param address - Bitcoin address
    * @return {string} Script pubkey hex
    */
-  private addressToScriptPubKey(address: string): string {
-    console.log('TODO: Implement addressToScriptPubKey: ', address);
-    // This is a simplified implementation
-    // In a real implementation, you'd properly decode the address and create the script
-    return `0014${this.generateRandomHex(20)}`; // P2WPKH script template
+  private addressToScriptPubKey(addressStr: string): string {
+    return address.toOutputScript(addressStr, this.network).toString('hex');
   }
 
   /**
@@ -527,8 +520,42 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         ourFundingInputIndexes.push(index);
       });
 
-      // Get adaptor points (either provided or calculated in browser)
-      const calculatedAdaptorPoints = adaptorPoints ?? this.getAdaptorPoints(dlcOffer);
+      // Always fetch adaptor points from backend for consistency
+      console.log('🔍 Fetching adaptor points from backend for validation...');
+      const backendAdaptorPoints = await this.getAdaptorPoints(dlcOffer);
+
+      // If adaptor points were provided (from accept response), validate they match
+      if (adaptorPoints) {
+        console.log('🔍 Validating provided adaptor points against backend calculation...');
+        console.log(`  Provided count: ${adaptorPoints.length}`);
+        console.log(`  Backend count: ${backendAdaptorPoints.length}`);
+
+        if (adaptorPoints.length !== backendAdaptorPoints.length) {
+          console.warn(
+            `⚠️ WARNING: Adaptor point count mismatch! Provided: ${adaptorPoints.length}, Backend: ${backendAdaptorPoints.length}`,
+          );
+        }
+
+        // Compare each adaptor point
+        let allMatch = true;
+        for (let i = 0; i < Math.min(adaptorPoints.length, backendAdaptorPoints.length); i++) {
+          if (adaptorPoints[i] !== backendAdaptorPoints[i]) {
+            console.warn(`⚠️ WARNING: Adaptor point ${i} mismatch!`);
+            console.warn(`  Provided:  ${adaptorPoints[i]}`);
+            console.warn(`  Backend:   ${backendAdaptorPoints[i]}`);
+            allMatch = false;
+          }
+        }
+
+        if (allMatch && adaptorPoints.length === backendAdaptorPoints.length) {
+          console.log('✅ All adaptor points match backend calculation');
+        } else {
+          console.warn('⚠️ Using backend-calculated adaptor points for signing');
+        }
+      }
+
+      // Always use backend-calculated adaptor points to ensure consistency
+      const calculatedAdaptorPoints = backendAdaptorPoints;
 
       const params = {
         fundingTransaction: {
@@ -886,55 +913,40 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
   }
 
   /**
-   * Get adaptor points calculated in the browser
+   * Get adaptor points from backend using DDK calculation
    * @param dlcOffer - The DLC offer containing oracle information
-   * @return {string[]} Array of adaptor points as hex strings
+   * @return {Promise<string[]>} Array of adaptor points as base64 strings
    */
-  getAdaptorPoints(dlcOffer: DlcOffer): string[] {
-    const contractInfo = dlcOffer.contractInfo as SingleContractInfo;
+  async getAdaptorPoints(dlcOffer: DlcOffer): Promise<string[]> {
+    try {
+      console.log('🔍 Fetching adaptor points from backend...');
 
-    const singleOracleInfo = contractInfo.oracleInfo as SingleOracleInfo;
-    const oracleAnnouncement = singleOracleInfo.announcement;
-    const oraclePubkey = oracleAnnouncement.oraclePubkey;
-    const oracleNonces = oracleAnnouncement.oracleEvent.oracleNonces;
+      const response = await fetch('http://localhost:3005/api/dlc/adaptor-points', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          dlcOfferHex: dlcOffer.serialize().toString('hex'),
+        }),
+      });
 
-    // Generate messages for each CET
-    const contractDescriptor = contractInfo.contractDescriptor;
-    const messages: Buffer[] = [];
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string; details?: string };
+        throw new Error(`Backend error: ${errorData.error} - ${errorData.details ?? ''}`);
+      }
 
-    // EnumeratedDescriptor`
-    const enumDescriptor = contractDescriptor as EnumeratedDescriptor;
-    for (const outcome of enumDescriptor.outcomes) {
-      // Convert outcome string to Buffer
-      console.log('Outcome:', outcome);
-      messages.push(Buffer.from(outcome.outcome, 'hex'));
+      const result = (await response.json()) as { adaptorPoints: string[]; success: boolean };
+
+      console.log(`✅ Received ${result.adaptorPoints.length} adaptor points from backend`);
+
+      console.log('Adaptor Points:', result.adaptorPoints);
+
+      return result.adaptorPoints;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to get adaptor points from backend: ${errorMessage}`);
     }
-
-    // Calculate adaptor points using your module
-    const adaptorPoints: string[] = [];
-
-    console.log(
-      'Messages:',
-      messages.map((message) => message.toString('hex')),
-    );
-    console.log('Oracle pubkey:', oraclePubkey);
-    console.log('Oracle nonces:', oracleNonces);
-
-    for (let i = 0; i < messages.length; i++) {
-      // Use your schnorr-adaptor-points module
-      const adaptorPoint = createAdaptorPoint(
-        [oraclePubkey], // Array of oracle public keys (Buffer)
-        [messages[i]], // Array of messages (Buffer)
-        [oracleNonces[i % oracleNonces.length]], // Array of R-values/nonces (Buffer)
-      );
-
-      // Convert result to hex string
-      const adaptorPointHex = adaptorPoint.toString('hex');
-      adaptorPoints.push(adaptorPointHex);
-    }
-
-    console.log(`✅ Calculated ${adaptorPoints.length} adaptor points in browser`);
-    return adaptorPoints;
   }
 
   /**
@@ -1019,82 +1031,65 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     dlcAccept: DlcAccept,
     dlcTransactions: DlcTransactions,
   ): Psbt {
-    const transaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
-
+    // Use the exact same pattern as DDK's CreateFundingSigsAlt
+    const transaction = btTransaction.fromBuffer(Buffer.from(dlcTransactions.fundTx.serialize()));
     const fundingPsbt = new Psbt({ network: this.network });
 
-    // Combine all funding inputs from both parties
+    // Combine all funding inputs from both parties (same as DDK)
     const allFundingInputs = [...dlcOffer.fundingInputs, ...dlcAccept.fundingInputs];
 
-    // Sort by inputSerialId to reconstruct proper transaction order
+    // Sort by inputSerialId to reconstruct proper transaction order (same as DDK)
     allFundingInputs.sort((a, b) => Number(a.inputSerialId - b.inputSerialId));
 
-    // Add all inputs to PSBT with proper witnessUtxo
+    // Add all inputs to PSBT with proper witnessUtxo (exactly like DDK)
     for (const fundingInput of allFundingInputs) {
       const prevOut = fundingInput.prevTx.outputs[fundingInput.prevTxVout];
 
       // Use the same pattern as DDK - slice(1) to remove length prefix
       const witnessUtxo = {
-        script: prevOut.scriptPubKey.serialize().subarray(1),
+        script: Buffer.from(prevOut.scriptPubKey.serialize().subarray(1)),
         value: Number(prevOut.value.sats),
       };
+
+      // Use sequence from the original transaction to ensure consistency (exactly like DDK)
+      const originalInput = transaction.ins.find(
+        (input) =>
+          input.hash.reverse().toString('hex') === fundingInput.prevTx.txId.toString() &&
+          input.index === fundingInput.prevTxVout,
+      );
+      const sequenceValue = originalInput ? originalInput.sequence : Number(fundingInput.sequence);
 
       console.log(
         `Adding input to PSBT: ${fundingInput.prevTx.txId.toString()}:${fundingInput.prevTxVout}`,
       );
-      console.log(
-        `  Sequence from fundingInput: ${fundingInput.sequence.toString()} (${Number(fundingInput.sequence.toString())})`,
-      );
+      console.log(`  Using sequence from bitcoinjs transaction: ${sequenceValue}`);
 
-      // Check what sequence the DLC transaction actually uses
-      const dlcTxInput = dlcTransactions.fundTx.inputs.find(
-        (input) =>
-          input.outpoint.txid.toString() === fundingInput.prevTx.txId.toString() &&
-          input.outpoint.outputIndex === fundingInput.prevTxVout,
-      );
-
-      if (dlcTxInput) {
-        console.log(
-          `  Sequence in DLC transaction: ${dlcTxInput.sequence.toString()} (${Number(dlcTxInput.sequence.toString())})`,
-        );
-        console.log(
-          `  Sequence match: ${Number(fundingInput.sequence.toString()) === Number(dlcTxInput.sequence.toString())}`,
-        );
-
-        // Use the sequence from the DLC transaction instead of the funding input
-        const actualSequence = Number(dlcTxInput.sequence.toString());
-        console.log(`  Using actual DLC transaction sequence: ${actualSequence}`);
-
-        fundingPsbt.addInput({
-          hash: fundingInput.prevTx.txId.serialize().toString('hex'),
-          index: fundingInput.prevTxVout,
-          sequence: actualSequence,
-          witnessUtxo,
-        });
-      } else {
-        console.log(
-          `  ⚠️ Could not find matching input in DLC transaction, using original sequence`,
-        );
-        fundingPsbt.addInput({
-          hash: fundingInput.prevTx.txId.serialize().toString('hex'),
-          index: fundingInput.prevTxVout,
-          sequence: Number(fundingInput.sequence),
-          witnessUtxo,
-        });
-      }
+      fundingPsbt.addInput({
+        hash: fundingInput.prevTx.txId.toString(),
+        index: fundingInput.prevTxVout,
+        sequence: sequenceValue,
+        witnessUtxo,
+      });
     }
 
+    // Add all outputs to PSBT (maintains transaction structure) - exactly like DDK
     for (const output of transaction.outs) {
       fundingPsbt.addOutput({
-        address: address.fromOutputScript(output.script, this.network),
+        address: address.fromOutputScript(Buffer.from(output.script), this.network),
         value: output.value,
       });
     }
 
-    // Set locktime to match the DLC transaction
-    const dlcTxLocktime = Number(dlcTransactions.fundTx.locktime.toString());
-    console.log(`🔍 Setting PSBT locktime to match DLC transaction: ${dlcTxLocktime}`);
-    fundingPsbt.setLocktime(dlcTxLocktime);
+    // Set locktime (DDK doesn't explicitly set this, but it should match)
+    fundingPsbt.setLocktime(transaction.locktime);
+
+    console.log('🔍 PSBT Structure (DDK-compatible):');
+    console.log(`  Input count: ${fundingPsbt.data.inputs.length}`);
+
+    console.log(`  Output count: ${fundingPsbt.txOutputs.length}`);
+    fundingPsbt.txOutputs.forEach((output, i) => {
+      console.log(`  Output ${i}: ${output.value} sats, script=${output.script.toString('hex')}`);
+    });
 
     return fundingPsbt;
   }
@@ -1141,6 +1136,11 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     // Get the actual funding output value from the funding transaction
     const fundingTransaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
     const actualFundingOutputValue = fundingTransaction.outs[dlcTransactions.fundTxVout].value;
+
+    console.log(
+      'Number(cetTransaction.inputs[0].sequence)',
+      Number(cetTransaction.inputs[0].sequence),
+    );
 
     // Add the funding input (CETs spend from the same funding transaction as refund)
     cetPsbt.addInput({

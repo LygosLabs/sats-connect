@@ -32,7 +32,7 @@ export function ManualDlcFinalize() {
     setFinalizeState({ isLoading: true });
 
     try {
-      const response = await fetch('http://localhost:3001/api/dlc/manual-finalize', {
+      const response = await fetch('http://localhost:3005/api/dlc/manual-finalize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -74,7 +74,7 @@ export function ManualDlcFinalize() {
     setBroadcastState({ isLoading: true });
 
     try {
-      const response = await fetch('http://localhost:3001/api/dlc/broadcast', {
+      const response = await fetch('http://localhost:3005/api/dlc/broadcast', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
