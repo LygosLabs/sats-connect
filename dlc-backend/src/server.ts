@@ -1,6 +1,4 @@
 import BitcoinDdkProvider from '@atomicfinance/bitcoin-ddk-provider';
-import { BitcoinEsploraApiProvider } from '@atomicfinance/bitcoin-esplora-api-provider';
-import { BitcoinJsWalletProvider } from '@atomicfinance/bitcoin-js-wallet-provider';
 import { Client } from '@atomicfinance/client';
 import { bitcoin, Input } from '@atomicfinance/types';
 import * as ddkJs from '@bennyblader/ddk-ts';
@@ -17,7 +15,9 @@ import { address } from 'bitcoinjs-lib';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
-import BlockstreamApiProvider from './BlockstreamApiProvider';
+import MinimalScanWalletProvider from './MinimalScanWalletProvider';
+import RateLimitedEsploraApiProvider from './RateLimitedEsploraApiProvider';
+// import BlockstreamApiProvider from './BlockstreamApiProvider';
 
 // Load environment variables
 dotenv.config();
@@ -25,48 +25,50 @@ dotenv.config();
 const app: express.Application = express();
 const port = 3005;
 
-// Setup DDK client with Blockstream API - using testnet3 for testing
+// Setup DDK client - using testnet4 via mempool.space Esplora API
 const network = BitcoinNetworks.bitcoin_testnet;
 
 const bitcoinWithDdk = new Client();
 
-// Add Blockstream API provider
-const blockstreamProvider = new BlockstreamApiProvider({
+// Add rate-limited Esplora API provider for testnet4 to avoid 429 errors
+const esploraProvider = new RateLimitedEsploraApiProvider({
+  url: 'https://mempool.space/testnet4/api',
   network,
-  clientId: process.env.BLOCKSTREAM_CLIENT_ID,
-  clientSecret: process.env.BLOCKSTREAM_CLIENT_SECRET,
   numberOfBlockConfirmation: 1,
   defaultFeePerByte: 3,
-});
+  rateLimitDelayMs: 50, // 500ms between requests
+}) as any;
 
-bitcoinWithDdk.addProvider(blockstreamProvider);
+bitcoinWithDdk.addProvider(esploraProvider);
 
-// const esploraProvider = new BitcoinEsploraApiProvider({
-//   url: 'https://blockstream.info/testnet/api',
+// Blockstream doesn't support testnet4 yet, so we're using mempool.space
+// const blockstreamProvider = new BlockstreamApiProvider({
 //   network,
-// }) as any;
-
-// bitcoinWithDdk.addProvider(esploraProvider);
+//   clientId: process.env.BLOCKSTREAM_CLIENT_ID,
+//   clientSecret: process.env.BLOCKSTREAM_CLIENT_SECRET,
+//   numberOfBlockConfirmation: 1,
+//   defaultFeePerByte: 3,
+// });
+// bitcoinWithDdk.addProvider(blockstreamProvider);
 
 const mnemonic = process.env.MNEMONIC || generateMnemonic(256);
 
-// Add wallet provider
-bitcoinWithDdk.addProvider(
-  new BitcoinJsWalletProvider({
-    network,
-    mnemonic,
-    baseDerivationPath: `m/84'/${network.coinType}'/0'`,
-    addressType: bitcoin.AddressType.BECH32,
-  }) as any
-);
+// Add wallet provider with minimal address scanning to reduce API calls
+const walletProvider = new MinimalScanWalletProvider({
+  network,
+  mnemonic,
+  baseDerivationPath: `m/84'/${network.coinType}'/0'`,
+  addressType: bitcoin.AddressType.BECH32,
+  addressGap: 1, // Only scan 1 unused address instead of 30
+}) as any;
+
+bitcoinWithDdk.addProvider(walletProvider);
 
 // Add DDK provider
 bitcoinWithDdk.addProvider(new BitcoinDdkProvider(network, ddkJs));
 
-console.log(`🌐 Network: ${network.name}`);
-// console.log(
-//   `🔐 Blockstream Auth: ${blockstreamProvider.isAuthenticationConfigured() ? 'ENABLED' : 'DISABLED'}`
-// );
+console.log(`🌐 Network: ${network.name} (testnet4)`);
+console.log(`🔗 API Provider: mempool.space testnet4 Esplora`);
 console.log(`💰 Wallet mnemonic: ${process.env.MNEMONIC ? 'PROVIDED' : 'GENERATED'}`);
 
 // Middleware
@@ -148,7 +150,7 @@ app.post('/api/dlc/accept', async (req, res) => {
 
     console.log('🔍 Inputs created for DLC accept:', inputs.length);
 
-    console.log('dlcOffer', dlcOffer.toJSON())
+    console.log('dlcOffer', dlcOffer.toJSON());
 
     // Use DDK client to accept the DLC offer with inputs
     const acceptDlcOfferResponse = await bitcoinWithDdk.dlc.acceptDlcOffer(dlcOffer, inputs);

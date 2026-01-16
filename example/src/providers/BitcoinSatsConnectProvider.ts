@@ -582,6 +582,8 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
       console.log('Params:', params);
 
+      console.log('params', JSON.stringify(params, null, 2));
+
       // Use the new dlc_signOffer method for unified signing
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
       const signResponse = (await (this.wallet.request as any)(
