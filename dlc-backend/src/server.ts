@@ -152,8 +152,41 @@ app.post('/api/dlc/accept', async (req, res) => {
 
     console.log('dlcOffer', dlcOffer.toJSON());
 
+    // Debug: Check offer funding inputs segwit status
+    console.log('🔍 Offer funding inputs segwit check:');
+    dlcOffer.fundingInputs.forEach((input, index) => {
+      console.log(
+        `  Input ${index}: isSegWit=${input.prevTx.isSegWit}, witness lengths: ${input.prevTx.inputs.map((i) => i.witness?.length || 0).join(', ')}`
+      );
+      console.log(
+        `    prevTx hex prefix: ${input.prevTx.serialize().toString('hex').substring(0, 20)}...`
+      );
+    });
+
     // Use DDK client to accept the DLC offer with inputs
-    const acceptDlcOfferResponse = await bitcoinWithDdk.dlc.acceptDlcOffer(dlcOffer, inputs);
+    let acceptDlcOfferResponse;
+    try {
+      acceptDlcOfferResponse = await bitcoinWithDdk.dlc.acceptDlcOffer(dlcOffer, inputs);
+    } catch (acceptError: any) {
+      // Debug: If accept fails, log more details about the inputs
+      console.error('🔴 Accept DLC Offer failed:', acceptError.message);
+      console.log('🔍 Debug: Backend inputs being used:');
+      for (const input of inputs) {
+        console.log(`  UTXO: ${input.txid}:${input.vout}`);
+        // Fetch raw tx to check segwit status
+        try {
+          const rawTxResponse = await fetch(
+            `https://mempool.space/testnet4/api/tx/${input.txid}/hex`
+          );
+          const rawTxHex = await rawTxResponse.text();
+          console.log(`  Raw tx hex prefix: ${rawTxHex.substring(0, 30)}...`);
+          console.log(`  Has segwit marker (0001): ${rawTxHex.substring(8, 12) === '0001'}`);
+        } catch (fetchErr) {
+          console.log(`  Could not fetch raw tx: ${fetchErr}`);
+        }
+      }
+      throw acceptError;
+    }
     const dlcAccept = acceptDlcOfferResponse.dlcAccept;
     dlcAccept.changeSpk = address.toOutputScript(firstAddress.address, network);
     dlcAccept.payoutSpk = address.toOutputScript(firstAddress.address, network);
