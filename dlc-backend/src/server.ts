@@ -192,16 +192,8 @@ app.post('/api/dlc/accept', async (req, res) => {
     dlcAccept.payoutSpk = address.toOutputScript(firstAddress.address, network);
     const dlcTransactions = acceptDlcOfferResponse.dlcTransactions;
 
-    // Calculate the proper contract ID using the funding transaction
-    const fundTxId = dlcTransactions.fundTx.txId.serialize();
-    const fundOutputIndex = dlcTransactions.fundTxVout;
-    const temporaryContractId = dlcOffer.temporaryContractId;
-
-    const contractId = await bitcoinWithDdk.getMethod('computeContractId')(
-      fundTxId,
-      fundOutputIndex,
-      temporaryContractId
-    );
+    // The contract ID is already computed by acceptDlcOffer and set on dlcTransactions
+    const contractId = dlcTransactions.contractId;
 
     // Store the state including transactions using the computed contract ID as hex string
     const contractIdHex = contractId.toString('hex');
