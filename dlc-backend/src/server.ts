@@ -220,6 +220,31 @@ app.post('/api/dlc/accept', async (req, res) => {
     // Transform msgsForDdk structure: flatten the nested messages into separate arrays
     const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
 
+    console.log('\n🔍 Oracle & Message Debug Info:');
+    console.log('Oracle public key:', oraclePublicKey.toString('hex'));
+    console.log(
+      'Oracle nonces:',
+      oracleNonces.map((n: Buffer) => n.toString('hex'))
+    );
+    console.log('Number of messages (outcomes):', transformedMsgsForDdk.length);
+    console.log(
+      'Raw enumMessages structure:',
+      JSON.stringify(
+        enumMessages.map((m: any) =>
+          m.msgs ? m.msgs.map((msg: Buffer) => msg.toString('hex')) : m
+        )
+      )
+    );
+    console.log(
+      'msgsForDdk structure depth:',
+      `[${msgsForDdk.length}][${msgsForDdk[0]?.length}][${msgsForDdk[0]?.[0]?.length}]`
+    );
+
+    // Log each message for adaptor point calculation
+    transformedMsgsForDdk.forEach((msgWrapper: Buffer[][], index: number) => {
+      console.log(`  Message ${index}:`, msgWrapper[0][0].toString('hex'));
+    });
+
     const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
       [
         {
@@ -230,9 +255,13 @@ app.post('/api/dlc/accept', async (req, res) => {
       transformedMsgsForDdk
     );
 
-    console.log('ddkJs', ddkJs);
-
-    console.log('adaptorPoints', adaptorPoints);
+    console.log('\n🔑 Adaptor Points (sent to Fordefi):');
+    console.log('Number of adaptor points:', adaptorPoints.length);
+    adaptorPoints.forEach((point: Buffer, index: number) => {
+      console.log(
+        `  Point ${index}: ${point.toString('hex')} (base64: ${point.toString('base64')})`
+      );
+    });
 
     // Debug: Get adaptor signature inputs using the new debug function
     // This lets us compare values with Fordefi to debug signature mismatches
@@ -259,6 +288,17 @@ app.post('/api/dlc/accept', async (req, res) => {
       fundOutput.scriptPubKey.serialize().toString('hex')
     );
     console.log('Number of CETs:', dlcTransactions.cets.length);
+
+    // Critical: Document which pubkey is used for verification
+    // When backend (accepter) verifies offerer's adaptor sigs, it uses dlcOffer.fundingPubkey
+    // Fordefi (offerer) must sign with the private key corresponding to dlcOffer.fundingPubkey
+    console.log('\n⚠️ VERIFICATION KEY INFO:');
+    console.log(
+      'Fordefi (offerer) should sign with private key for:',
+      offerFundingPubkey.toString('hex')
+    );
+    console.log('Backend (accepter) will verify using pubkey:', offerFundingPubkey.toString('hex'));
+    console.log('If Fordefi signs with a different key, verification WILL FAIL');
 
     // Test with the first CET
     if (dlcTransactions.cets.length > 0) {
