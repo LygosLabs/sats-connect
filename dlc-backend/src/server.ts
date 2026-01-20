@@ -230,7 +230,104 @@ app.post('/api/dlc/accept', async (req, res) => {
       transformedMsgsForDdk
     );
 
+    console.log('ddkJs', ddkJs);
+
     console.log('adaptorPoints', adaptorPoints);
+
+    // Debug: Get adaptor signature inputs using the new debug function
+    // This lets us compare values with Fordefi to debug signature mismatches
+    const fundOutput = dlcTransactions.fundTx.outputs[dlcTransactions.fundTxVout];
+    const fundingScriptPubkey = fundOutput.scriptPubKey.serialize();
+    // fundOutput.value is in BTC, convert to satoshis
+    const fundOutputValue = BigInt(Math.round(fundOutput.value * 1e8));
+
+    console.log('\n🔍 CET Adaptor Signature Debug Info:');
+    console.log('Fund output value (sats):', fundOutputValue.toString());
+    console.log('Funding script pubkey:', fundingScriptPubkey.toString('hex'));
+    console.log('Number of CETs:', dlcTransactions.cets.length);
+
+    // Test with the first CET
+    if (dlcTransactions.cets.length > 0) {
+      const firstCet = dlcTransactions.cets[0];
+      const cetRawBytes = firstCet.serialize();
+
+      // Convert to ddk-ts Transaction format
+      // TxIn has: outpoint (txid, outputIndex), scriptSig, sequence, witness
+      // node-dlc Tx uses: version, locktime.value, inputs, outputs
+      const cetForDdk = {
+        version: firstCet.version,
+        lockTime: firstCet.locktime.value,
+        inputs: firstCet.inputs.map((input: any) => ({
+          txid: input.outpoint.txid.serialize().toString('hex'),
+          vout: input.outpoint.outputIndex,
+          scriptSig: input.scriptSig?.serialize() || Buffer.alloc(0),
+          sequence: input.sequence?.value || 0xffffffff,
+          witness: input.witness || [],
+        })),
+        outputs: firstCet.outputs.map((output: any) => ({
+          value: BigInt(Math.round(output.value * 1e8)),
+          scriptPubkey: output.scriptPubKey.serialize(),
+        })),
+        rawBytes: cetRawBytes,
+      };
+
+      try {
+        // Use the new debug function to get all inputs that go into adaptor signature creation
+        // transformedMsgsForDdk[0] is [[message]] for first outcome
+        // getCetAdaptorSignatureInputs expects Array<Array<Buffer>> = [[msg1], [msg2], ...]
+        // For a single-nonce enum oracle, this is just [[message]]
+        const msgsForFirstCet = transformedMsgsForDdk[0][0]; // [[message]] -> [message] for single oracle
+        console.log(
+          'msgsForFirstCet structure:',
+          JSON.stringify(msgsForFirstCet.map((m: Buffer) => m.toString('hex')))
+        );
+
+        const debugInfo = ddkJs.getCetAdaptorSignatureInputs(
+          cetForDdk,
+          [
+            {
+              publicKey: oraclePublicKey,
+              nonces: oracleNonces,
+            },
+          ],
+          fundingScriptPubkey,
+          fundOutputValue,
+          [msgsForFirstCet] // Wrap in array for single oracle: [[message]]
+        );
+
+        console.log('\n📊 Debug info for CET 0:');
+        console.log('  CET txid:', debugInfo.cetTxid);
+        console.log('  Sighash:', debugInfo.sighash.toString('hex'));
+        console.log('  Adaptor point:', debugInfo.adaptorPoint.toString('hex'));
+        console.log('  Input index:', debugInfo.inputIndex);
+        console.log('  Script pubkey used:', debugInfo.scriptPubkey.toString('hex'));
+        console.log('  Value used:', debugInfo.value.toString());
+        console.log('  CET raw bytes length:', debugInfo.cetRaw.length);
+
+        // Compare adaptor point from debug function with the one from createCetAdaptorPointsFromOracleInfo
+        console.log('\n🔄 Adaptor point comparison:');
+        console.log(
+          '  From createCetAdaptorPointsFromOracleInfo:',
+          adaptorPoints[0]?.toString('hex')
+        );
+        console.log('  From getCetAdaptorSignatureInputs:', debugInfo.adaptorPoint.toString('hex'));
+        console.log(
+          '  Match:',
+          adaptorPoints[0]?.toString('hex') === debugInfo.adaptorPoint.toString('hex')
+        );
+      } catch (debugError: any) {
+        console.error('❌ Debug function error:', debugError.message);
+      }
+
+      // Also test getCetSighash directly
+      try {
+        const sighash = ddkJs.getCetSighash(cetForDdk, fundingScriptPubkey, fundOutputValue);
+        console.log('\n📝 Direct sighash call:');
+        console.log('  Sighash:', sighash.toString('hex'));
+      } catch (sighashError: any) {
+        console.error('❌ Sighash function error:', sighashError.message);
+      }
+    }
 
     res.json({
       dlcAcceptHex: dlcAccept.serialize().toString('hex'),
