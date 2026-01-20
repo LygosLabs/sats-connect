@@ -237,13 +237,27 @@ app.post('/api/dlc/accept', async (req, res) => {
     // Debug: Get adaptor signature inputs using the new debug function
     // This lets us compare values with Fordefi to debug signature mismatches
     const fundOutput = dlcTransactions.fundTx.outputs[dlcTransactions.fundTxVout];
-    const fundingScriptPubkey = fundOutput.scriptPubKey.serialize();
     // fundOutput.value is in BTC, convert to satoshis
     const fundOutputValue = BigInt(Math.round(fundOutput.value * 1e8));
 
+    // For BIP143 sighash, we need the witness script (2-of-2 multisig), NOT the P2WSH scriptPubKey
+    // The funding script is created from both parties' funding pubkeys
+    const offerFundingPubkey = dlcOffer.fundingPubkey;
+    const acceptFundingPubkey = dlcAccept.fundingPubkey;
+
+    // Create the funding locking script (2-of-2 multisig witness script)
+    // This is what BIP143 uses for sighash calculation
+    const fundingScript = ddkJs.createFundTxLockingScript(offerFundingPubkey, acceptFundingPubkey);
+
     console.log('\n🔍 CET Adaptor Signature Debug Info:');
     console.log('Fund output value (sats):', fundOutputValue.toString());
-    console.log('Funding script pubkey:', fundingScriptPubkey.toString('hex'));
+    console.log('Offer funding pubkey:', offerFundingPubkey.toString('hex'));
+    console.log('Accept funding pubkey:', acceptFundingPubkey.toString('hex'));
+    console.log('Funding script (witness script for BIP143):', fundingScript.toString('hex'));
+    console.log(
+      'Fund output scriptPubKey (P2WSH):',
+      fundOutput.scriptPubKey.serialize().toString('hex')
+    );
     console.log('Number of CETs:', dlcTransactions.cets.length);
 
     // Test with the first CET
@@ -290,7 +304,7 @@ app.post('/api/dlc/accept', async (req, res) => {
               nonces: oracleNonces,
             },
           ],
-          fundingScriptPubkey,
+          fundingScript, // Use the witness script (2-of-2 multisig), not P2WSH scriptPubKey
           fundOutputValue,
           [msgsForFirstCet] // Wrap in array for single oracle: [[message]]
         );
@@ -321,7 +335,7 @@ app.post('/api/dlc/accept', async (req, res) => {
 
       // Also test getCetSighash directly
       try {
-        const sighash = ddkJs.getCetSighash(cetForDdk, fundingScriptPubkey, fundOutputValue);
+        const sighash = ddkJs.getCetSighash(cetForDdk, fundingScript, fundOutputValue);
         console.log('\n📝 Direct sighash call:');
         console.log('  Sighash:', sighash.toString('hex'));
       } catch (sighashError: any) {
