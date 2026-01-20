@@ -300,25 +300,26 @@ app.post('/api/dlc/accept', async (req, res) => {
     console.log('Backend (accepter) will verify using pubkey:', offerFundingPubkey.toString('hex'));
     console.log('If Fordefi signs with a different key, verification WILL FAIL');
 
-    // Test with the first CET
-    if (dlcTransactions.cets.length > 0) {
-      const firstCet = dlcTransactions.cets[0];
-      const cetRawBytes = firstCet.serialize();
+    // ========== DEBUG INFO FOR ALL CETs ==========
+    console.log('\n📊 DEBUG INFO FOR ALL CETs:');
+    console.log('='.repeat(80));
+
+    for (let cetIndex = 0; cetIndex < dlcTransactions.cets.length; cetIndex++) {
+      const cet = dlcTransactions.cets[cetIndex];
+      const cetRawBytes = cet.serialize();
 
       // Convert to ddk-ts Transaction format
-      // TxIn has: outpoint (txid, outputIndex), scriptSig, sequence, witness
-      // node-dlc Tx uses: version, locktime.value, inputs, outputs
       const cetForDdk = {
-        version: firstCet.version,
-        lockTime: firstCet.locktime.value,
-        inputs: firstCet.inputs.map((input: any) => ({
+        version: cet.version,
+        lockTime: cet.locktime.value,
+        inputs: cet.inputs.map((input: any) => ({
           txid: input.outpoint.txid.serialize().toString('hex'),
           vout: input.outpoint.outputIndex,
           scriptSig: input.scriptSig?.serialize() || Buffer.alloc(0),
           sequence: input.sequence?.value || 0xffffffff,
           witness: input.witness || [],
         })),
-        outputs: firstCet.outputs.map((output: any) => ({
+        outputs: cet.outputs.map((output: any) => ({
           value: BigInt(Math.round(output.value * 1e8)),
           scriptPubkey: output.scriptPubKey.serialize(),
         })),
@@ -326,15 +327,7 @@ app.post('/api/dlc/accept', async (req, res) => {
       };
 
       try {
-        // Use the new debug function to get all inputs that go into adaptor signature creation
-        // transformedMsgsForDdk[0] is [[message]] for first outcome
-        // getCetAdaptorSignatureInputs expects Array<Array<Buffer>> = [[msg1], [msg2], ...]
-        // For a single-nonce enum oracle, this is just [[message]]
-        const msgsForFirstCet = transformedMsgsForDdk[0][0]; // [[message]] -> [message] for single oracle
-        console.log(
-          'msgsForFirstCet structure:',
-          JSON.stringify(msgsForFirstCet.map((m: Buffer) => m.toString('hex')))
-        );
+        const msgsForCet = transformedMsgsForDdk[cetIndex][0];
 
         const debugInfo = ddkJs.getCetAdaptorSignatureInputs(
           cetForDdk,
@@ -344,44 +337,129 @@ app.post('/api/dlc/accept', async (req, res) => {
               nonces: oracleNonces,
             },
           ],
-          fundingScript, // Use the witness script (2-of-2 multisig), not P2WSH scriptPubKey
+          fundingScript,
           fundOutputValue,
-          [msgsForFirstCet] // Wrap in array for single oracle: [[message]]
+          [msgsForCet]
         );
 
-        console.log('\n📊 Debug info for CET 0:');
-        console.log('  CET txid:', debugInfo.cetTxid);
-        console.log('  Sighash:', debugInfo.sighash.toString('hex'));
-        console.log('  Adaptor point:', debugInfo.adaptorPoint.toString('hex'));
-        console.log('  Input index:', debugInfo.inputIndex);
-        console.log('  Script pubkey used:', debugInfo.scriptPubkey.toString('hex'));
-        console.log('  Value used:', debugInfo.value.toString());
-        console.log('  CET raw bytes length:', debugInfo.cetRaw.length);
-
-        // Compare adaptor point from debug function with the one from createCetAdaptorPointsFromOracleInfo
-        console.log('\n🔄 Adaptor point comparison:');
-        console.log(
-          '  From createCetAdaptorPointsFromOracleInfo:',
-          adaptorPoints[0]?.toString('hex')
-        );
-        console.log('  From getCetAdaptorSignatureInputs:', debugInfo.adaptorPoint.toString('hex'));
-        console.log(
-          '  Match:',
-          adaptorPoints[0]?.toString('hex') === debugInfo.adaptorPoint.toString('hex')
-        );
-      } catch (debugError: any) {
-        console.error('❌ Debug function error:', debugError.message);
-      }
-
-      // Also test getCetSighash directly
-      try {
         const sighash = ddkJs.getCetSighash(cetForDdk, fundingScript, fundOutputValue);
-        console.log('\n📝 Direct sighash call:');
-        console.log('  Sighash:', sighash.toString('hex'));
-      } catch (sighashError: any) {
-        console.error('❌ Sighash function error:', sighashError.message);
+
+        console.log(`\n📊 CET ${cetIndex}:`);
+        console.log(`  Txid: ${debugInfo.cetTxid}`);
+        console.log(`  Sighash: ${debugInfo.sighash.toString('hex')}`);
+        console.log(`  Adaptor point: ${debugInfo.adaptorPoint.toString('hex')}`);
+        console.log(`  Adaptor point (base64): ${debugInfo.adaptorPoint.toString('base64')}`);
+        console.log(`  Message hash: ${msgsForCet[0].toString('hex')}`);
+        console.log(`  Input index: ${debugInfo.inputIndex}`);
+        console.log(`  Script pubkey (witness script): ${debugInfo.scriptPubkey.toString('hex')}`);
+        console.log(`  Value (sats): ${debugInfo.value.toString()}`);
+        console.log(`  Direct sighash: ${sighash.toString('hex')}`);
+        console.log(
+          `  Sighash match: ${debugInfo.sighash.toString('hex') === sighash.toString('hex')}`
+        );
+        console.log(
+          `  Adaptor point match with array: ${adaptorPoints[cetIndex]?.toString('hex') === debugInfo.adaptorPoint.toString('hex')}`
+        );
+
+        // Output payout info
+        cet.outputs.forEach((output: any, outIdx: number) => {
+          console.log(
+            `  Output ${outIdx}: ${Math.round(output.value * 1e8)} sats to ${output.scriptPubKey.serialize().toString('hex')}`
+          );
+        });
+      } catch (debugError: any) {
+        console.error(`❌ Debug error for CET ${cetIndex}:`, debugError.message);
       }
     }
+    console.log('='.repeat(80));
+
+    // ========== DEBUG INFO FOR FUNDING TX ==========
+    console.log('\n💰 DEBUG INFO FOR FUNDING TX:');
+    console.log('='.repeat(80));
+    const fundTx = dlcTransactions.fundTx;
+    console.log(`  Txid: ${fundTx.txId.toString()}`);
+    console.log(`  Version: ${fundTx.version}`);
+    console.log(`  Locktime: ${fundTx.locktime.value}`);
+    console.log(`  Input count: ${fundTx.inputs.length}`);
+    fundTx.inputs.forEach((input: any, idx: number) => {
+      console.log(`  Input ${idx}:`);
+      console.log(`    Prev txid: ${input.outpoint.txid.serialize().toString('hex')}`);
+      console.log(`    Prev vout: ${input.outpoint.outputIndex}`);
+      console.log(`    Sequence: ${input.sequence?.value || 0xffffffff}`);
+    });
+    console.log(`  Output count: ${fundTx.outputs.length}`);
+    fundTx.outputs.forEach((output: any, idx: number) => {
+      const valueSats = Math.round(output.value * 1e8);
+      console.log(`  Output ${idx}: ${valueSats} sats`);
+      console.log(`    ScriptPubKey: ${output.scriptPubKey.serialize().toString('hex')}`);
+    });
+    console.log(`  Fund output vout: ${dlcTransactions.fundTxVout}`);
+    console.log(`  Fund output value: ${fundOutputValue.toString()} sats`);
+
+    // Calculate funding tx sighash for each input (for Fordefi validation)
+    console.log('\n🔐 FUNDING TX SIGHASH INFO (for Fordefi):');
+    // The funding output that CETs spend uses P2WSH with the 2-of-2 multisig script
+    // But funding tx inputs are typically P2WPKH from each party's wallet
+    dlcOffer.fundingInputs.forEach((fundingInput: any, idx: number) => {
+      const prevOutput = fundingInput.prevTx.outputs[fundingInput.prevTxVout];
+      const prevValueSats = Math.round(prevOutput.value * 1e8);
+      console.log(`  Offerer Input ${idx}:`);
+      console.log(`    Prev txid: ${fundingInput.prevTx.txId.toString()}`);
+      console.log(`    Prev vout: ${fundingInput.prevTxVout}`);
+      console.log(`    Prev value: ${prevValueSats} sats`);
+      console.log(`    Prev scriptPubKey: ${prevOutput.scriptPubKey.serialize().toString('hex')}`);
+      console.log(`    Serial ID: ${fundingInput.inputSerialId}`);
+    });
+    console.log('='.repeat(80));
+
+    // ========== DEBUG INFO FOR REFUND TX ==========
+    console.log('\n🔄 DEBUG INFO FOR REFUND TX:');
+    console.log('='.repeat(80));
+    const refundTx = dlcTransactions.refundTx;
+    const refundRawBytes = refundTx.serialize();
+
+    const refundForDdk = {
+      version: refundTx.version,
+      lockTime: refundTx.locktime.value,
+      inputs: refundTx.inputs.map((input: any) => ({
+        txid: input.outpoint.txid.serialize().toString('hex'),
+        vout: input.outpoint.outputIndex,
+        scriptSig: input.scriptSig?.serialize() || Buffer.alloc(0),
+        sequence: input.sequence?.value || 0xffffffff,
+        witness: input.witness || [],
+      })),
+      outputs: refundTx.outputs.map((output: any) => ({
+        value: BigInt(Math.round(output.value * 1e8)),
+        scriptPubkey: output.scriptPubKey.serialize(),
+      })),
+      rawBytes: refundRawBytes,
+    };
+
+    console.log(`  Txid: ${refundTx.txId.toString()}`);
+    console.log(`  Version: ${refundTx.version}`);
+    console.log(`  Locktime: ${refundTx.locktime.value}`);
+    console.log(`  Input count: ${refundTx.inputs.length}`);
+    refundTx.inputs.forEach((input: any, idx: number) => {
+      console.log(`  Input ${idx}:`);
+      console.log(`    Prev txid: ${input.outpoint.txid.serialize().toString('hex')}`);
+      console.log(`    Prev vout: ${input.outpoint.outputIndex}`);
+      console.log(`    Sequence: ${input.sequence?.value || 0xffffffff}`);
+    });
+    console.log(`  Output count: ${refundTx.outputs.length}`);
+    refundTx.outputs.forEach((output: any, idx: number) => {
+      const valueSats = Math.round(output.value * 1e8);
+      console.log(`  Output ${idx}: ${valueSats} sats`);
+      console.log(`    ScriptPubKey: ${output.scriptPubKey.serialize().toString('hex')}`);
+    });
+
+    // Get refund tx sighash
+    try {
+      const refundSighash = ddkJs.getCetSighash(refundForDdk, fundingScript, fundOutputValue);
+      console.log(`  Refund sighash: ${refundSighash.toString('hex')}`);
+    } catch (e: any) {
+      console.error(`  Refund sighash error: ${e.message}`);
+    }
+    console.log('='.repeat(80));
 
     res.json({
       dlcAcceptHex: dlcAccept.serialize().toString('hex'),
@@ -1042,6 +1120,206 @@ app.post('/api/dlc/execute', async (req, res) => {
     console.error('Error executing DLC:', error);
     res.status(500).json({
       error: 'Failed to execute DLC',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Execute DLC directly by decrypting adaptor sig (skip verification)
+ * POST /api/dlc/execute-direct
+ * Body: { contractId: string, oracleAttestationHex: string }
+ * Returns: { txId: string, txHex: string, success: boolean }
+ */
+app.post('/api/dlc/execute-direct', async (req, res) => {
+  try {
+    const { contractId, oracleAttestationHex } = req.body;
+
+    if (!contractId || !oracleAttestationHex) {
+      return res.status(400).json({ error: 'contractId and oracleAttestationHex are required' });
+    }
+
+    // Get stored DLC state
+    const dlcState = dlcStore.get(contractId);
+    if (!dlcState?.offer || !dlcState?.accept || !dlcState?.sign || !dlcState?.transactions) {
+      return res.status(404).json({ error: 'Complete DLC state not found for contract ID' });
+    }
+
+    // Deserialize the oracle attestation
+    const { OracleAttestation } = await import('@node-dlc/messaging');
+    const oracleAttestation = OracleAttestation.deserialize(
+      Buffer.from(oracleAttestationHex, 'hex')
+    );
+
+    console.log('🔍 Direct Execution (skip verification):');
+    console.log('Oracle attestation event ID:', oracleAttestation.eventId);
+    console.log('Oracle attestation outcomes:', oracleAttestation.outcomes);
+    console.log('Oracle signatures count:', oracleAttestation.signatures.length);
+    oracleAttestation.signatures.forEach((sig: Buffer, i: number) => {
+      console.log(`  Signature ${i}: ${sig.toString('hex')}`);
+    });
+
+    // Find the matching CET based on outcome
+    const contractInfo = dlcState.offer.contractInfo as SingleContractInfo;
+    const contractDescriptor = contractInfo.contractDescriptor;
+    const attestedOutcome = oracleAttestation.outcomes[0];
+
+    console.log('Looking for outcome:', attestedOutcome);
+
+    // For enum contracts, find the CET index
+    let outcomeIndex = -1;
+    const crypto = require('crypto');
+
+    // Hash the attested outcome for comparison
+    const attestedOutcomeHash = crypto.createHash('sha256').update(attestedOutcome).digest('hex');
+    console.log('Attested outcome hash:', attestedOutcomeHash);
+
+    // Check for enumerated contract descriptor
+    // EnumeratedDescriptor has type = 42768 (MessageType.ContractDescriptorV0)
+    // or contractDescriptorType = 0 (ContractDescriptorType.Enumerated)
+    const isEnumerated =
+      contractDescriptor.type === 42768 || (contractDescriptor as any).contractDescriptorType === 0;
+
+    console.log('Contract descriptor type:', contractDescriptor.type);
+    console.log('Contract descriptor is enumerated:', isEnumerated);
+
+    if (isEnumerated) {
+      // EnumeratedDescriptor (enum)
+      const enumDescriptor = contractDescriptor as any;
+
+      // Debug: Log all outcomes in the contract
+      console.log('Enum descriptor keys:', Object.keys(enumDescriptor));
+      console.log('Outcomes array exists:', !!enumDescriptor.outcomes);
+      console.log('Outcomes count:', enumDescriptor.outcomes?.length || 0);
+      console.log('Contract outcomes:');
+      enumDescriptor.outcomes?.forEach((o: any, idx: number) => {
+        const outcomeText = typeof o === 'string' ? o : o.outcome;
+        const outcomeHash = crypto.createHash('sha256').update(outcomeText).digest('hex');
+        console.log(`  ${idx}: "${outcomeText}" -> hash: ${outcomeHash}`);
+      });
+
+      outcomeIndex = enumDescriptor.outcomes.findIndex((o: any) => {
+        const outcomeText = typeof o === 'string' ? o : o.outcome;
+        // Direct match
+        if (outcomeText === attestedOutcome) return true;
+        // Hash of stored outcome matches hash of attested outcome
+        const storedOutcomeHash = crypto.createHash('sha256').update(outcomeText).digest('hex');
+        if (storedOutcomeHash === attestedOutcomeHash) return true;
+        // Stored outcome IS a hash that matches attested outcome hash
+        if (outcomeText === attestedOutcomeHash) return true;
+        return false;
+      });
+    }
+
+    console.log('Found outcome index:', outcomeIndex);
+
+    if (outcomeIndex < 0) {
+      return res.status(400).json({ error: `Outcome "${attestedOutcome}" not found in contract` });
+    }
+
+    // Get the adaptor signature for this outcome
+    const adaptorSig = dlcState.sign.cetAdaptorSignatures.sigs[outcomeIndex];
+    console.log('Adaptor signature for outcome:');
+    console.log('  encryptedSig length:', adaptorSig.encryptedSig.length);
+    console.log('  encryptedSig hex:', adaptorSig.encryptedSig.toString('hex'));
+    console.log('  dleqProof length:', adaptorSig.dleqProof?.length || 0);
+
+    // Get the CET
+    const cet = dlcState.transactions.cets[outcomeIndex];
+    console.log('CET txid:', cet.txId.toString());
+
+    // Get fund output value
+    const fundOutputValue = BigInt(
+      Math.round(dlcState.transactions.fundTx.outputs[dlcState.transactions.fundTxVout].value * 1e8)
+    );
+
+    // Try to directly sign the CET using ddk
+    console.log('🔧 Attempting direct CET signing...');
+
+    // We need the accepter's private key to sign
+    // Get it from the wallet
+    const addresses = await bitcoinWithDdk.getMethod('getAddresses')(0, 1);
+    const accepterAddress = addresses[0];
+    console.log('Accepter address:', accepterAddress.address);
+
+    // Get the key pair for signing
+    const keyPair = await bitcoinWithDdk.getMethod('keyPair')(accepterAddress.derivationPath);
+    const accepterPrivKey = keyPair.privateKey.toString('hex');
+
+    // Create the funding script (witness script for BIP143)
+    const fundingScript = ddkJs.createFundTxLockingScript(
+      dlcState.offer.fundingPubkey,
+      dlcState.accept.fundingPubkey
+    );
+    console.log('Funding script:', fundingScript.toString('hex'));
+
+    // signCet signature:
+    // signCet(cet, adaptorSignature, oracleSignatures, fundingSecretKey, otherPubkey, fundingScriptPubkey, fundOutputValue)
+    // We are accepter, so:
+    // - fundingSecretKey = accepter's private key
+    // - otherPubkey = offerer's pubkey (the one who signed the adaptor sig)
+    // - fundingScriptPubkey = the 2-of-2 multisig witness script
+
+    const cetForDdk = {
+      version: cet.version,
+      lockTime: cet.locktime.value,
+      inputs: cet.inputs.map((input: any) => ({
+        txid: input.outpoint.txid.serialize().toString('hex'),
+        vout: input.outpoint.outputIndex,
+        scriptSig: input.scriptSig?.serialize() || Buffer.alloc(0),
+        sequence: input.sequence?.value || 0xffffffff,
+        witness: input.witness || [],
+      })),
+      outputs: cet.outputs.map((output: any) => ({
+        value: BigInt(Math.round(output.value * 1e8)),
+        scriptPubkey: output.scriptPubKey.serialize(),
+      })),
+      rawBytes: cet.serialize(),
+    };
+
+    console.log(
+      'CET for DDK:',
+      JSON.stringify({
+        version: cetForDdk.version,
+        lockTime: cetForDdk.lockTime,
+        inputCount: cetForDdk.inputs.length,
+        outputCount: cetForDdk.outputs.length,
+      })
+    );
+
+    console.log('Calling ddkJs.signCet with:');
+    console.log('  adaptorSig length:', adaptorSig.encryptedSig.length);
+    console.log('  oracleSignatures count:', oracleAttestation.signatures.length);
+    console.log('  fundingSecretKey length:', accepterPrivKey.length / 2, 'bytes');
+    console.log('  otherPubkey (offerer):', dlcState.offer.fundingPubkey.toString('hex'));
+    console.log('  fundingScript length:', fundingScript.length);
+    console.log('  fundOutputValue:', fundOutputValue.toString());
+
+    // Try signCet directly
+    const signedCet = ddkJs.signCet(
+      cetForDdk,
+      adaptorSig.encryptedSig, // The adaptor signature from offerer
+      oracleAttestation.signatures, // Oracle Schnorr signatures
+      Buffer.from(accepterPrivKey, 'hex'), // Our private key (accepter)
+      dlcState.offer.fundingPubkey, // Other pubkey (offerer who made adaptor sig)
+      fundingScript, // The 2-of-2 multisig witness script
+      fundOutputValue
+    );
+
+    console.log('✅ Direct CET signing succeeded!');
+    const txHex = signedCet.rawBytes.toString('hex');
+
+    res.json({
+      txId: signedCet.txid || 'unknown',
+      txHex,
+      success: true,
+      message: 'CET signed directly (verification skipped)',
+    });
+  } catch (error: any) {
+    console.error('❌ Direct execution failed:', error);
+    console.error('Stack:', error.stack);
+    res.status(500).json({
+      error: 'Failed to execute DLC directly',
       details: error.message,
     });
   }

@@ -514,10 +514,32 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       }
 
       // Find which inputs belong to our wallet for funding transaction
+      // Inputs are sorted by inputSerialId when creating PSBT, so we need to map correctly
+      const allFundingInputs = [...dlcOffer.fundingInputs, ...dlcAccept.fundingInputs];
+      allFundingInputs.sort((a, b) => Number(a.inputSerialId - b.inputSerialId));
+
+      // Create a set of offerer input serial IDs for quick lookup
+      const offererInputSerialIds = new Set(
+        dlcOffer.fundingInputs.map((input) => input.inputSerialId.toString()),
+      );
+
+      // Find PSBT indexes that correspond to offerer inputs
       const ourFundingInputIndexes: number[] = [];
-      dlcOffer.fundingInputs.forEach((_, index) => {
-        // Sign all offerer inputs since we created the offer
-        ourFundingInputIndexes.push(index);
+      allFundingInputs.forEach((input, psbtIndex) => {
+        if (offererInputSerialIds.has(input.inputSerialId.toString())) {
+          ourFundingInputIndexes.push(psbtIndex);
+        }
+      });
+
+      console.log(
+        `🔍 Funding input mapping: Offerer has ${dlcOffer.fundingInputs.length} inputs at PSBT indexes: [${ourFundingInputIndexes.join(', ')}]`,
+      );
+      console.log(`🔍 All funding inputs sorted by serialId:`);
+      allFundingInputs.forEach((input, psbtIndex) => {
+        const isOfferer = offererInputSerialIds.has(input.inputSerialId.toString());
+        console.log(
+          `  PSBT index ${psbtIndex}: serialId=${input.inputSerialId}, ${isOfferer ? 'OFFERER' : 'ACCEPTER'}`,
+        );
       });
 
       // Always fetch adaptor points from backend for consistency
@@ -556,6 +578,11 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
       // Always use backend-calculated adaptor points to ensure consistency
       const calculatedAdaptorPoints = backendAdaptorPoints;
+
+      console.log(`🔍 SIGN REQUEST - Funding inputs to sign:`);
+      console.log(`  Address: ${firstAddress}`);
+      console.log(`  Input indexes: [${ourFundingInputIndexes.join(', ')}]`);
+      console.log(`  Total offerer inputs: ${dlcOffer.fundingInputs.length}`);
 
       const params = {
         fundingTransaction: {
@@ -612,9 +639,21 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const fundingSignatures = new FundingSignatures();
 
       // Extract witness elements from the signed funding PSBT
+      console.log(`🔍 Extracting signatures from signed PSBT:`);
+      console.log(`  ourFundingInputIndexes: [${ourFundingInputIndexes.join(', ')}]`);
+      console.log(`  Signed PSBT input count: ${signedFundingPsbt.data.inputs.length}`);
+      signedFundingPsbt.data.inputs.forEach((input, idx) => {
+        console.log(
+          `  Input ${idx}: partialSig count=${input.partialSig?.length ?? 0}, finalScriptWitness=${input.finalScriptWitness ? 'present' : 'absent'}`,
+        );
+      });
+
       const witnessElements: ScriptWitnessV0[][] = [];
       for (const inputIndex of ourFundingInputIndexes) {
         const input = signedFundingPsbt.data.inputs[inputIndex];
+        console.log(
+          `  Checking input ${inputIndex}: partialSig=${!!input?.partialSig}, length=${input?.partialSig?.length ?? 0}`,
+        );
         if (input?.partialSig && input.partialSig.length > 0) {
           // Extract signature from partialSig array
           const partialSig = input.partialSig[0];

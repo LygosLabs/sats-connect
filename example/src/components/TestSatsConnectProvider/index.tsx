@@ -70,6 +70,13 @@ export function TestSatsConnectProvider() {
     error?: string;
   }>({ isLoading: false });
 
+  const [executeDirectState, setExecuteDirectState] = useState<{
+    isLoading: boolean;
+    txId?: string;
+    txHex?: string;
+    error?: string;
+  }>({ isLoading: false });
+
   const { refetch, error, data, isFetching, isError, isSuccess } = useQuery({
     queryKey: ['testSatsConnectProvider'],
     queryFn: async () => {
@@ -325,6 +332,46 @@ export function TestSatsConnectProvider() {
       setExecuteBroadcastState({ isLoading: false, success: true });
     } catch (error: unknown) {
       setExecuteBroadcastState({
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  };
+
+  // Direct execute - skips verification and tries to decrypt/sign directly
+  const handleExecuteDirect = async () => {
+    if (!data?.contractId) {
+      setExecuteDirectState({ isLoading: false, error: 'No contract ID available' });
+      return;
+    }
+
+    setExecuteDirectState({ isLoading: true });
+
+    try {
+      const response = await fetch('http://localhost:3005/api/dlc/execute-direct', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contractId: data.contractId,
+          oracleAttestationHex: oracleAttestation.serialize().toString('hex'),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string; details?: string };
+        throw new Error(`Backend error: ${errorData.error} - ${errorData.details ?? ''}`);
+      }
+
+      const result = (await response.json()) as { txId: string; txHex: string };
+      setExecuteDirectState({
+        isLoading: false,
+        txId: result.txId,
+        txHex: result.txHex,
+      });
+    } catch (error: unknown) {
+      setExecuteDirectState({
         isLoading: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -824,7 +871,7 @@ export function TestSatsConnectProvider() {
                             The funding transaction has been broadcast. You can now execute the DLC
                             using the oracle attestation.
                           </div>
-                          <div style={{ marginTop: '0.5rem' }}>
+                          <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem' }}>
                             <Button
                               onClick={() => {
                                 handleExecute().catch(console.error);
@@ -833,10 +880,43 @@ export function TestSatsConnectProvider() {
                             >
                               {executeState.isLoading ? 'Executing...' : 'Execute DLC'}
                             </Button>
+                            <Button
+                              onClick={() => {
+                                handleExecuteDirect().catch(console.error);
+                              }}
+                              disabled={executeDirectState.isLoading}
+                              style={{ backgroundColor: '#ff9800' }}
+                            >
+                              {executeDirectState.isLoading
+                                ? 'Direct Executing...'
+                                : 'Execute Direct (Skip Verify)'}
+                            </Button>
                           </div>
                           {executeState.error && (
                             <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
                               <strong>Execute Error:</strong> {executeState.error}
+                            </div>
+                          )}
+                          {executeDirectState.error && (
+                            <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
+                              <strong>Direct Execute Error:</strong> {executeDirectState.error}
+                            </div>
+                          )}
+                          {executeDirectState.txId && (
+                            <div style={{ color: '#28a745', marginTop: '0.5rem' }}>
+                              <strong>✅ Direct Execution Succeeded!</strong>
+                              <div style={{ fontSize: '0.8em', marginTop: '0.25rem' }}>
+                                TX ID: {executeDirectState.txId}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: '0.7em',
+                                  marginTop: '0.25rem',
+                                  wordBreak: 'break-all',
+                                }}
+                              >
+                                TX Hex: {executeDirectState.txHex?.substring(0, 100)}...
+                              </div>
                             </div>
                           )}
                           {executeState.txId && (
