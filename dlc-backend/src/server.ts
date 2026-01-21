@@ -1224,6 +1224,11 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
     console.log('  encryptedSig hex:', adaptorSig.encryptedSig.toString('hex'));
     console.log('  dleqProof length:', adaptorSig.dleqProof?.length || 0);
 
+    // Combine encryptedSig (65 bytes) + dleqProof (97 bytes) = 162 bytes total
+    // This is what secp256k1_zkp's EcdsaAdaptorSignature::from_slice expects
+    const fullAdaptorSig = Buffer.concat([adaptorSig.encryptedSig, adaptorSig.dleqProof]);
+    console.log('  Full adaptor sig length:', fullAdaptorSig.length, '(expected: 162)');
+
     // Get the CET
     const cet = dlcState.transactions.cets[outcomeIndex];
     console.log('CET txid:', cet.txId.toString());
@@ -1237,28 +1242,99 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
     console.log('🔧 Attempting direct CET signing...');
 
     // We need the accepter's private key to sign
-    // Get it from the wallet
-    const addresses = await bitcoinWithDdk.getMethod('getAddresses')(0, 1);
-    const accepterAddress = addresses[0];
-    console.log('Accepter address:', accepterAddress.address);
+    // IMPORTANT: We must find the private key that corresponds to the ACTUAL funding pubkey
+    // used in the DlcAccept, NOT just addresses[0]. The funding pubkey may be at a different
+    // derivation path than the first address.
+    const accepterFundingPubkeyHex = dlcState.accept.fundingPubkey.toString('hex');
 
-    // Get the key pair for signing
-    const keyPair = await bitcoinWithDdk.getMethod('keyPair')(accepterAddress.derivationPath);
-    const accepterPrivKey = keyPair.privateKey.toString('hex');
+    console.log('Looking for private key matching funding pubkey:', accepterFundingPubkeyHex);
 
-    // Create the funding script (witness script for BIP143)
-    const fundingScript = ddkJs.createFundTxLockingScript(
-      dlcState.offer.fundingPubkey,
-      dlcState.accept.fundingPubkey
-    );
-    console.log('Funding script:', fundingScript.toString('hex'));
+    // Search through wallet addresses to find the one matching our funding pubkey
+    let accepterPrivKey: string | null = null;
+
+    // First check existing addresses
+    const existingAddresses = await bitcoinWithDdk.getMethod('getAddresses')();
+    for (const addressInfo of existingAddresses) {
+      if (addressInfo.derivationPath) {
+        try {
+          const keyPair = await bitcoinWithDdk.getMethod('keyPair')(addressInfo.derivationPath);
+          const pubkeyHex = Buffer.from(keyPair.publicKey).toString('hex');
+          if (pubkeyHex === accepterFundingPubkeyHex) {
+            accepterPrivKey = Buffer.from(keyPair.privateKey).toString('hex');
+            console.log(`Found funding key at derivation path: ${addressInfo.derivationPath}`);
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    // If not found, search through more addresses
+    if (!accepterPrivKey) {
+      console.log('Key not in existing addresses, searching extended range...');
+      for (const isChange of [false, true]) {
+        for (let i = 0; i < 100; i++) {
+          try {
+            const addresses = await bitcoinWithDdk.getMethod('getAddresses')(i, 1, isChange);
+            if (addresses && addresses.length > 0) {
+              const addressInfo = addresses[0];
+              if (addressInfo.derivationPath) {
+                const keyPair = await bitcoinWithDdk.getMethod('keyPair')(
+                  addressInfo.derivationPath
+                );
+                const pubkeyHex = Buffer.from(keyPair.publicKey).toString('hex');
+                if (pubkeyHex === accepterFundingPubkeyHex) {
+                  accepterPrivKey = Buffer.from(keyPair.privateKey).toString('hex');
+                  console.log(
+                    `Found funding key at derivation path: ${addressInfo.derivationPath}`
+                  );
+                  break;
+                }
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+        if (accepterPrivKey) break;
+      }
+    }
+
+    if (!accepterPrivKey) {
+      throw new Error(`Could not find private key for funding pubkey: ${accepterFundingPubkeyHex}`);
+    }
+
+    console.log('Found accepter private key for funding pubkey');
+
+    // Note: Despite the parameter name "fundingScriptPubkey" in ddk-ffi, it actually expects
+    // the ACCEPTER's funding pubkey (33 bytes), NOT the full witness script.
+    // The Rust code does: make_funding_redeemscript(&funding_pubkey, &other_pk)
+    // where funding_pubkey = our pubkey (accepter) and other_pk = offerer's pubkey
 
     // signCet signature:
     // signCet(cet, adaptorSignature, oracleSignatures, fundingSecretKey, otherPubkey, fundingScriptPubkey, fundOutputValue)
     // We are accepter, so:
     // - fundingSecretKey = accepter's private key
     // - otherPubkey = offerer's pubkey (the one who signed the adaptor sig)
-    // - fundingScriptPubkey = the 2-of-2 multisig witness script
+    // - fundingScriptPubkey = accepter's funding pubkey (33 bytes, NOT the full script!)
+    const accepterFundingPubkey = dlcState.accept.fundingPubkey;
+    console.log('Accepter funding pubkey:', accepterFundingPubkey.toString('hex'));
+    console.log('Offerer funding pubkey:', dlcState.offer.fundingPubkey.toString('hex'));
+
+    // Debug: Compare pubkeys lexicographically to understand signature ordering
+    const accepterPkHex = accepterFundingPubkey.toString('hex');
+    const offererPkHex = dlcState.offer.fundingPubkey.toString('hex');
+    console.log('Pubkey comparison (accepter < offerer):', accepterPkHex < offererPkHex);
+    console.log('  Accepter pk:', accepterPkHex);
+    console.log('  Offerer pk:', offererPkHex);
+
+    // Create the funding script to verify it matches what was used for the adaptor sig
+    const fundingScript = ddkJs.createFundTxLockingScript(
+      dlcState.offer.fundingPubkey,
+      accepterFundingPubkey
+    );
+    console.log('Funding script (2-of-2 multisig):', fundingScript.toString('hex'));
 
     const cetForDdk = {
       version: cet.version,
@@ -1288,26 +1364,41 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
     );
 
     console.log('Calling ddkJs.signCet with:');
-    console.log('  adaptorSig length:', adaptorSig.encryptedSig.length);
+    console.log('  fullAdaptorSig length:', fullAdaptorSig.length, '(expected: 162)');
     console.log('  oracleSignatures count:', oracleAttestation.signatures.length);
+    oracleAttestation.signatures.forEach((sig: Buffer, i: number) => {
+      console.log(`    Oracle sig ${i}: ${sig.toString('hex')} (${sig.length} bytes)`);
+    });
     console.log('  fundingSecretKey length:', accepterPrivKey.length / 2, 'bytes');
     console.log('  otherPubkey (offerer):', dlcState.offer.fundingPubkey.toString('hex'));
-    console.log('  fundingScript length:', fundingScript.length);
+    console.log('  fundingScriptPubkey (accepter):', accepterFundingPubkey.toString('hex'));
+    console.log('  fundingScriptPubkey length:', accepterFundingPubkey.length, '(expected: 33)');
     console.log('  fundOutputValue:', fundOutputValue.toString());
+    console.log('  fundingScript for sighash:', fundingScript.toString('hex'));
 
     // Try signCet directly
+    // IMPORTANT: The signCet function parameters are:
+    // - funding_secret_key: OUR private key (accepter)
+    // - other_pubkey: The OTHER party's pubkey (offerer) - who created the adaptor sig
+    // - funding_script_pubkey: Used to create redeem script - the Rust code does:
+    //   make_funding_redeemscript(&funding_pubkey, &other_pk)
+    //   But since make_funding_redeemscript SORTS pubkeys, the order doesn't affect the script.
+    //   However, funding_script_pubkey is also used for the signature - it should be
+    //   the pubkey corresponding to funding_secret_key (i.e., OUR pubkey).
     const signedCet = ddkJs.signCet(
       cetForDdk,
-      adaptorSig.encryptedSig, // The adaptor signature from offerer
+      fullAdaptorSig, // Full 162-byte adaptor signature (encryptedSig + dleqProof)
       oracleAttestation.signatures, // Oracle Schnorr signatures
       Buffer.from(accepterPrivKey, 'hex'), // Our private key (accepter)
       dlcState.offer.fundingPubkey, // Other pubkey (offerer who made adaptor sig)
-      fundingScript, // The 2-of-2 multisig witness script
+      accepterFundingPubkey, // Our pubkey (accepter) - matches the private key above
       fundOutputValue
     );
 
     console.log('✅ Direct CET signing succeeded!');
     const txHex = signedCet.rawBytes.toString('hex');
+
+    console.log('txHex', txHex);
 
     res.json({
       txId: signedCet.txid || 'unknown',
