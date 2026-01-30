@@ -724,14 +724,44 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
           console.log(`Total length: ${adaptorSignature.length} bytes`);
           console.log(`Full hex: ${adaptorSignature.toString('hex')}`);
 
-          // Use the full 162-byte adaptor signature as expected
-          console.log(`Using full ${adaptorSignature.length}-byte adaptor signature`);
+          // Fordefi returns 162-byte adaptor signatures in format:
+          //   [R(33)][Ra(33)][Sa(32)][B(32)][C(32)]
+          // secp256k1-zkp EcdsaAdaptorSignature format (used by ddk-ffi):
+          //   [Ra(33)][Sa(32)][R(33)][e(32)][s(32)] = 162 bytes
+          // Note: B=e and C=s in the DLEQ proof
+          //
+          // DDK internal storage: encryptedSig = full 162 bytes, dleqProof = empty
+          // This matches how BitcoinDdkProvider stores adaptor signatures
+          if (adaptorSignature.length === 162) {
+            const R = adaptorSignature.subarray(0, 33); // bytes 0-32: R (commitment point)
+            const Ra = adaptorSignature.subarray(33, 66); // bytes 33-65: Ra (adapted R)
+            const Sa = adaptorSignature.subarray(66, 98); // bytes 66-97: Sa (adapted s)
+            const B = adaptorSignature.subarray(98, 130); // bytes 98-129: B (DLEQ proof e)
+            const C = adaptorSignature.subarray(130, 162); // bytes 130-161: C (DLEQ proof s)
 
-          // Create a signature structure that matches what's expected
-          cetSigs.push({
-            encryptedSig: adaptorSignature, // Use the full 162-byte signature
-            dleqProof: Buffer.alloc(0), // Placeholder - may need actual proof
-          });
+            // Reorder to secp256k1-zkp format: Ra, Sa, R, B, C
+            const reorderedSig = Buffer.concat([Ra, Sa, R, B, C]); // 162 bytes
+
+            console.log(`Converted Fordefi adaptor sig to secp256k1-zkp format:`);
+            console.log(`  Original (Fordefi):  R, Ra, Sa, B, C`);
+            console.log(`  Reordered (ddk-ffi): Ra, Sa, R, B, C`);
+            console.log(`  Full 162-byte sig: ${reorderedSig.toString('hex')}`);
+
+            // DDK internal format: store full 162 bytes in encryptedSig, empty dleqProof
+            cetSigs.push({
+              encryptedSig: reorderedSig,
+              dleqProof: Buffer.alloc(0),
+            });
+          } else {
+            console.warn(
+              `Unexpected adaptor signature length: ${adaptorSignature.length} (expected 162)`,
+            );
+            // Fallback: store as-is (may not work correctly)
+            cetSigs.push({
+              encryptedSig: adaptorSignature,
+              dleqProof: Buffer.alloc(0),
+            });
+          }
 
           console.log('---');
         }
@@ -1034,10 +1064,15 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     const fundingTransaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
     const actualFundingOutputValue = fundingTransaction.outs[dlcTransactions.fundTxVout].value;
 
+    // CRITICAL: Use the input hash directly from the raw refund transaction
+    // The raw transaction already has the correct prevout hash in internal byte order
+    const rawRefundInputHash = transaction.ins[0].hash;
+    const rawRefundInputIndex = transaction.ins[0].index;
+
     // Add the funding input
     refundPsbt.addInput({
-      hash: dlcTransactions.fundTx.txId.serialize(),
-      index: dlcTransactions.fundTxVout,
+      hash: rawRefundInputHash, // Use the hash from the raw refund tx (already in correct internal byte order)
+      index: rawRefundInputIndex,
       sequence: Number(dlcTransactions.refundTx.inputs[0].sequence),
       witnessUtxo: {
         script: paymentVariant.output!,
@@ -1136,6 +1171,198 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
   }
 
   /**
+   * Sign a CET for execution using Fordefi's signPsbt
+   * Returns the ECDSA signature that can be combined with the server's decrypted adaptor sig
+   *
+   * @param dlcOffer - The DLC offer
+   * @param dlcAccept - The DLC accept message
+   * @param dlcTransactions - The DLC transactions
+   * @param outcomeIndex - Index of the CET to sign (based on oracle outcome)
+   * @return {Promise<Buffer>} The ECDSA signature (DER format, ~71 bytes)
+   */
+  async signCetForExecution(
+    dlcOffer: DlcOffer,
+    dlcAccept: DlcAccept,
+    dlcTransactions: DlcTransactions,
+    outcomeIndex: number,
+  ): Promise<Buffer> {
+    // 1. Create CET PSBT using existing createCetPsbt()
+    const cetPsbt = this.createCetPsbt(dlcOffer, dlcAccept, dlcTransactions, outcomeIndex);
+
+    // Get the raw CET from ddk-ts for comparison
+    const rawCet = dlcTransactions.cets[outcomeIndex];
+    const rawCetTx = btTransaction.fromBuffer(rawCet.serialize());
+
+    console.log('🔍 signCetForExecution - PSBT vs Raw CET Comparison:');
+    console.log('================== RAW CET FROM DDK ==================');
+    console.log(`  Raw CET hex: ${rawCet.serialize().toString('hex')}`);
+    console.log(`  Raw CET txid: ${rawCetTx.getId()}`);
+    console.log(`  Raw CET version: ${rawCetTx.version}`);
+    console.log(`  Raw CET locktime: ${rawCetTx.locktime}`);
+    console.log(`  Raw CET inputs: ${rawCetTx.ins.length}`);
+    rawCetTx.ins.forEach((input, i) => {
+      console.log(`    Input ${i}:`);
+      console.log(`      hash: ${input.hash.toString('hex')}`);
+      console.log(`      hash (reversed): ${Buffer.from(input.hash).reverse().toString('hex')}`);
+      console.log(`      index: ${input.index}`);
+      console.log(`      sequence: ${input.sequence}`);
+    });
+    console.log(`  Raw CET outputs: ${rawCetTx.outs.length}`);
+    rawCetTx.outs.forEach((output, i) => {
+      console.log(
+        `    Output ${i}: ${output.value} sats, script: ${output.script.toString('hex')}`,
+      );
+    });
+
+    console.log('================== PSBT TRANSACTION ==================');
+    // Extract unsigned transaction from PSBT for comparison
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
+    const psbtTx = (cetPsbt as any).__CACHE.__TX as btTransaction;
+    console.log(`  PSBT tx version: ${psbtTx.version}`);
+    console.log(`  PSBT tx locktime: ${psbtTx.locktime}`);
+    console.log(`  PSBT tx inputs: ${psbtTx.ins.length}`);
+    psbtTx.ins.forEach((input, i) => {
+      console.log(`    Input ${i}:`);
+      console.log(`      hash: ${input.hash.toString('hex')}`);
+      console.log(`      hash (reversed): ${Buffer.from(input.hash).reverse().toString('hex')}`);
+      console.log(`      index: ${input.index}`);
+      console.log(`      sequence: ${input.sequence}`);
+    });
+    console.log(`  PSBT tx outputs: ${psbtTx.outs.length}`);
+    psbtTx.outs.forEach((output, i) => {
+      console.log(
+        `    Output ${i}: ${output.value} sats, script: ${output.script.toString('hex')}`,
+      );
+    });
+
+    console.log('================== COMPARISON ==================');
+    console.log(`  Version match: ${rawCetTx.version === psbtTx.version}`);
+    console.log(`  Locktime match: ${rawCetTx.locktime === psbtTx.locktime}`);
+    console.log(`  Input count match: ${rawCetTx.ins.length === psbtTx.ins.length}`);
+    console.log(`  Output count match: ${rawCetTx.outs.length === psbtTx.outs.length}`);
+
+    // Compare input hashes
+    if (rawCetTx.ins.length > 0 && psbtTx.ins.length > 0) {
+      const rawInputHash = rawCetTx.ins[0].hash.toString('hex');
+      const psbtInputHash = psbtTx.ins[0].hash.toString('hex');
+      console.log(`  Input 0 hash match: ${rawInputHash === psbtInputHash}`);
+      if (rawInputHash !== psbtInputHash) {
+        console.log(`    RAW:  ${rawInputHash}`);
+        console.log(`    PSBT: ${psbtInputHash}`);
+      }
+      console.log(`  Input 0 index match: ${rawCetTx.ins[0].index === psbtTx.ins[0].index}`);
+      console.log(
+        `  Input 0 sequence match: ${rawCetTx.ins[0].sequence === psbtTx.ins[0].sequence}`,
+      );
+    }
+
+    // Compare outputs
+    for (let i = 0; i < Math.min(rawCetTx.outs.length, psbtTx.outs.length); i++) {
+      const rawOut = rawCetTx.outs[i];
+      const psbtOut = psbtTx.outs[i];
+      console.log(`  Output ${i} value match: ${rawOut.value === psbtOut.value}`);
+      console.log(
+        `  Output ${i} script match: ${rawOut.script.toString('hex') === psbtOut.script.toString('hex')}`,
+      );
+    }
+
+    console.log('================== PSBT INPUT DATA ==================');
+    console.log(`  PSBT inputs:`, cetPsbt.data.inputs);
+    console.log(
+      `  PSBT input 0 witnessScript:`,
+      cetPsbt.data.inputs[0]?.witnessScript?.toString('hex'),
+    );
+    console.log(`  PSBT input 0 witnessUtxo:`, cetPsbt.data.inputs[0]?.witnessUtxo);
+
+    // Compute the sighash that Fordefi should be signing (for comparison with server)
+    // For P2WSH, the sighash is computed using BIP143
+    try {
+      const inputData = cetPsbt.data.inputs[0];
+      const witnessScript = inputData.witnessScript;
+      const witnessUtxo = inputData.witnessUtxo;
+
+      if (witnessScript && witnessUtxo) {
+        // Get the underlying transaction from PSBT
+        const cetTransaction = dlcTransactions.cets[outcomeIndex];
+        const tx = btTransaction.fromBuffer(cetTransaction.serialize());
+
+        // BIP143 sighash for P2WSH
+        const sighash = tx.hashForWitnessV0(
+          0, // input index
+          witnessScript, // script code (witness script for P2WSH)
+          witnessUtxo.value, // value
+          0x01, // SIGHASH_ALL
+        );
+        console.log(`  🔍 Computed sighash (BIP143): ${sighash.toString('hex')}`);
+      }
+    } catch (e) {
+      console.log(`  Could not compute sighash for logging:`, e);
+    }
+
+    // 2. Get payment address for signing
+    const paymentAddress = await this.getPaymentAddress();
+
+    console.log(`  Payment address: ${paymentAddress.address}`);
+
+    // 3. Call Fordefi signPsbt
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
+    const signResponse = (await (this.wallet.request as any)('signPsbt', {
+      psbt: cetPsbt.toBase64(),
+      signInputs: {
+        [paymentAddress.address]: [0], // Sign input 0 (the funding output)
+      },
+    })) as SatsConnectResponse<{ psbt: string }>;
+
+    console.log('🔍 signCetForExecution - Sign response:', signResponse);
+
+    if (signResponse.status === 'error') {
+      throw new Error(`Failed to sign CET: ${signResponse.error?.message ?? 'Unknown error'}`);
+    }
+
+    if (!signResponse.result?.psbt) {
+      throw new Error('No signed PSBT in response');
+    }
+
+    // 4. Extract signature from signed PSBT
+    const signedPsbt = Psbt.fromBase64(signResponse.result.psbt);
+    const input = signedPsbt.data.inputs[0];
+
+    console.log('🔍 signCetForExecution - Signed PSBT input:', {
+      partialSigCount: input?.partialSig?.length ?? 0,
+      hasFinalScriptWitness: !!input?.finalScriptWitness,
+    });
+
+    if (!input?.partialSig || input.partialSig.length === 0) {
+      throw new Error('No signature found in signed PSBT');
+    }
+
+    const signature = input.partialSig[0].signature;
+    const pubkey = input.partialSig[0].pubkey;
+
+    console.log('🔍 signCetForExecution - Extracted signature:');
+    console.log(`  Pubkey: ${pubkey.toString('hex')}`);
+    console.log(`  Signature: ${signature.toString('hex')} (${signature.length} bytes)`);
+
+    // Return the DER signature (without sighash byte if present)
+    // PSBT partialSig should not include sighash byte, but let's strip it if it's there
+    let derSig = signature;
+    if (signature.length === 71 || signature.length === 72) {
+      // Check if last byte is sighash - if signature parses as valid DER without last byte
+      // For now, assume it's pure DER from PSBT
+      derSig = signature;
+    } else if (signature.length === 72 || signature.length === 73) {
+      // Has sighash byte appended, strip it
+      derSig = signature.subarray(0, signature.length - 1);
+    }
+
+    console.log(
+      `  DER signature (for witness): ${derSig.toString('hex')} (${derSig.length} bytes)`,
+    );
+
+    return derSig;
+  }
+
+  /**
    * Create CET PSBT for SatsConnect signing
    * @param dlcOffer - The DLC offer
    * @param dlcAccept - The DLC accept message
@@ -1183,10 +1410,28 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       Number(cetTransaction.inputs[0].sequence),
     );
 
+    // CRITICAL: Use the input hash directly from the raw CET transaction
+    // The raw CET already has the correct prevout hash in internal byte order
+    // Using dlcTransactions.fundTx.txId.serialize() might give us the wrong byte order
+    const rawCetInputHash = transaction.ins[0].hash;
+    const rawCetInputIndex = transaction.ins[0].index;
+
+    console.log('🔍 createCetPsbt - Input hash comparison:');
+    console.log(
+      `  dlcTransactions.fundTx.txId.serialize(): ${dlcTransactions.fundTx.txId.serialize().toString('hex')}`,
+    );
+    console.log(`  Raw CET input hash (from bitcoinjs): ${rawCetInputHash.toString('hex')}`);
+    console.log(
+      `  Raw CET input hash reversed: ${Buffer.from(rawCetInputHash).reverse().toString('hex')}`,
+    );
+    console.log(`  dlcTransactions.fundTxVout: ${dlcTransactions.fundTxVout}`);
+    console.log(`  Raw CET input index: ${rawCetInputIndex}`);
+
     // Add the funding input (CETs spend from the same funding transaction as refund)
+    // Use the hash directly from the raw CET to ensure byte order is correct
     cetPsbt.addInput({
-      hash: dlcTransactions.fundTx.txId.serialize(),
-      index: dlcTransactions.fundTxVout,
+      hash: rawCetInputHash, // Use the hash from the raw CET (already in correct internal byte order)
+      index: rawCetInputIndex,
       sequence: Number(cetTransaction.inputs[0].sequence),
       witnessUtxo: {
         script: paymentVariant.output!,

@@ -11,7 +11,7 @@ import {
 } from '@node-dlc/messaging';
 import { generateMnemonic } from 'bip39';
 import { BitcoinNetworks } from 'bitcoin-network';
-import { address } from 'bitcoinjs-lib';
+import { address, Transaction as btcTransaction, payments, Psbt } from 'bitcoinjs-lib';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -1224,10 +1224,21 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
     console.log('  encryptedSig hex:', adaptorSig.encryptedSig.toString('hex'));
     console.log('  dleqProof length:', adaptorSig.dleqProof?.length || 0);
 
-    // Combine encryptedSig (65 bytes) + dleqProof (97 bytes) = 162 bytes total
-    // This is what secp256k1_zkp's EcdsaAdaptorSignature::from_slice expects
-    const fullAdaptorSig = Buffer.concat([adaptorSig.encryptedSig, adaptorSig.dleqProof]);
+    // Get the full 162-byte adaptor signature for secp256k1_zkp's EcdsaAdaptorSignature
+    // DDK internal format stores the full 162 bytes in encryptedSig (dleqProof is empty)
+    // Other implementations may split: encryptedSig (65 bytes) + dleqProof (97 bytes)
+    // Either way, concatenating gives us the full 162 bytes
+    const fullAdaptorSig = Buffer.concat([
+      adaptorSig.encryptedSig,
+      adaptorSig.dleqProof || Buffer.alloc(0),
+    ]);
     console.log('  Full adaptor sig length:', fullAdaptorSig.length, '(expected: 162)');
+    if (fullAdaptorSig.length !== 162) {
+      console.error('❌ ERROR: Adaptor signature has unexpected length!');
+      console.log(
+        '  This indicates a format mismatch between how the signature was created and stored.'
+      );
+    }
 
     // Get the CET
     const cet = dlcState.transactions.cets[outcomeIndex];
@@ -1376,6 +1387,41 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
     console.log('  fundOutputValue:', fundOutputValue.toString());
     console.log('  fundingScript for sighash:', fundingScript.toString('hex'));
 
+    // Compute and log the sighash for debugging
+    console.log('🔍 Computing sighash for execution...');
+    const executionSighash = ddkJs.getCetSighash(cetForDdk, fundingScript, fundOutputValue);
+    console.log('  Execution sighash:', executionSighash.toString('hex'));
+
+    // Also compute adaptor signature inputs to compare with what was used during accept
+    const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(
+      (dlcState.offer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    );
+    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
+    const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
+    const msgsForCet = transformedMsgsForDdk[outcomeIndex][0];
+
+    const oraclePublicKey = (
+      (dlcState.offer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    ).announcement.oraclePublicKey;
+    const oracleNonces = (
+      (dlcState.offer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    ).announcement.getNonces();
+
+    const debugInfo = ddkJs.getCetAdaptorSignatureInputs(
+      cetForDdk,
+      [{ publicKey: oraclePublicKey, nonces: oracleNonces }],
+      fundingScript,
+      fundOutputValue,
+      [msgsForCet]
+    );
+
+    console.log('🔍 CET debug info during execution:');
+    console.log('  CET txid:', debugInfo.cetTxid);
+    console.log('  Sighash:', debugInfo.sighash.toString('hex'));
+    console.log('  Adaptor point:', debugInfo.adaptorPoint.toString('hex'));
+    console.log('  Value:', debugInfo.value.toString());
+    console.log('  Script pubkey:', debugInfo.scriptPubkey.toString('hex'));
+
     // Try signCet directly
     // IMPORTANT: The signCet function parameters are:
     // - funding_secret_key: OUR private key (accepter)
@@ -1398,10 +1444,15 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
     console.log('✅ Direct CET signing succeeded!');
     const txHex = signedCet.rawBytes.toString('hex');
 
+    // Compute txid from the signed transaction
+    const signedCetBtc = btcTransaction.fromBuffer(signedCet.rawBytes);
+    const signedCetTxId = signedCetBtc.getId();
+
     console.log('txHex', txHex);
+    console.log('txId', signedCetTxId);
 
     res.json({
-      txId: signedCet.txid || 'unknown',
+      txId: signedCetTxId,
       txHex,
       success: true,
       message: 'CET signed directly (verification skipped)',
@@ -1473,6 +1524,320 @@ app.post('/api/dlc/adaptor-points', async (req, res) => {
     console.error('Error calculating adaptor points:', error);
     res.status(500).json({
       error: 'Failed to calculate adaptor points',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Execute DLC with Fordefi signature
+ * Fordefi signs the CET via signPsbt, server decrypts its adaptor sig, combines both
+ * POST /api/dlc/execute-with-fordefi
+ * Body: { contractId: string, oracleAttestationHex: string, fordefiSignature: string }
+ * Returns: { txId: string, txHex: string, success: boolean, debugInfo: object }
+ */
+app.post('/api/dlc/execute-with-fordefi', async (req, res) => {
+  try {
+    const { contractId, oracleAttestationHex, fordefiSignature } = req.body;
+
+    if (!contractId || !oracleAttestationHex || !fordefiSignature) {
+      return res.status(400).json({
+        error: 'contractId, oracleAttestationHex, and fordefiSignature are required',
+      });
+    }
+
+    // Get stored DLC state
+    const dlcState = dlcStore.get(contractId);
+    if (!dlcState?.offer || !dlcState?.accept || !dlcState?.transactions) {
+      return res.status(404).json({ error: 'DLC state not found for contract ID' });
+    }
+
+    // Deserialize the oracle attestation
+    const { OracleAttestation } = await import('@node-dlc/messaging');
+    const oracleAttestation = OracleAttestation.deserialize(
+      Buffer.from(oracleAttestationHex, 'hex')
+    );
+
+    console.log('🔍 Execute with Fordefi - Oracle attestation:');
+    console.log('  Event ID:', oracleAttestation.eventId);
+    console.log('  Outcomes:', oracleAttestation.outcomes);
+    console.log('  Signatures count:', oracleAttestation.signatures.length);
+
+    // The attested outcome maps to CET index 0 (trump wins = index 0)
+    const outcomeIndex = 0;
+    console.log('  Using outcome index:', outcomeIndex);
+
+    // Get server's adaptor signature for this outcome (from dlcAccept, since server is accepter)
+    const serverAdaptorSig = dlcState.accept.cetAdaptorSignatures.sigs[outcomeIndex];
+
+    console.log('🔍 Server adaptor signature (raw structure):');
+    console.log('  encryptedSig length:', serverAdaptorSig.encryptedSig.length);
+    console.log('  encryptedSig hex:', serverAdaptorSig.encryptedSig.toString('hex'));
+    console.log('  dleqProof length:', serverAdaptorSig.dleqProof?.length || 0);
+    console.log('  dleqProof hex:', serverAdaptorSig.dleqProof?.toString('hex') || 'none');
+
+    // DDK's internal format stores the full 162-byte adaptor signature in encryptedSig
+    // (with dleqProof being empty). The signature is already in secp256k1-zkp format:
+    //   [Ra(33)][Sa(32)][R(33)][e(32)][s(32)] = 162 bytes
+    //
+    // Some implementations may split it differently:
+    //   encryptedSig (65 bytes) = [Ra(33)][Sa(32)]
+    //   dleqProof (97 bytes) = [R(33)][e(32)][s(32)]
+    //
+    // Concatenating handles both cases correctly.
+    const fullAdaptorSig = Buffer.concat([
+      serverAdaptorSig.encryptedSig,
+      serverAdaptorSig.dleqProof || Buffer.alloc(0),
+    ]);
+
+    console.log('  Full adaptor sig length:', fullAdaptorSig.length, '(expected: 162)');
+    console.log('  Full adaptor sig hex:', fullAdaptorSig.toString('hex'));
+
+    if (fullAdaptorSig.length !== 162) {
+      throw new Error(
+        `Unexpected adaptor signature length: ${fullAdaptorSig.length} (expected 162)`
+      );
+    }
+
+    // Debug: Parse the adaptor sig components (secp256k1-zkp format)
+    const Ra = fullAdaptorSig.subarray(0, 33);
+    const Sa = fullAdaptorSig.subarray(33, 65);
+    const R = fullAdaptorSig.subarray(65, 98);
+    const e = fullAdaptorSig.subarray(98, 130);
+    const s = fullAdaptorSig.subarray(130, 162);
+    console.log('  Adaptor sig components (secp256k1-zkp format):');
+    console.log('    Ra (adapted R): ', Ra.toString('hex'));
+    console.log('    Sa (adapted s): ', Sa.toString('hex'));
+    console.log('    R (commitment): ', R.toString('hex'));
+    console.log('    e (DLEQ proof): ', e.toString('hex'));
+    console.log('    s (DLEQ proof): ', s.toString('hex'));
+
+    // Compute the sighash to compare with what was used during accept
+    const cet = dlcState.transactions.cets[outcomeIndex];
+    const cetRawBytes = cet.serialize();
+
+    // Debug: Log raw CET structure
+    console.log('🔍 Raw CET from DLC Transactions:');
+    console.log('  Raw CET hex:', cetRawBytes.toString('hex'));
+    const rawCetBtc = btcTransaction.fromBuffer(cetRawBytes);
+    console.log('  Raw CET txid (bitcoinjs):', rawCetBtc.getId());
+    console.log('  Raw CET version:', rawCetBtc.version);
+    console.log('  Raw CET locktime:', rawCetBtc.locktime);
+    console.log('  Raw CET inputs:', rawCetBtc.ins.length);
+    rawCetBtc.ins.forEach((input, i) => {
+      console.log(`    Input ${i}:`);
+      console.log(`      hash: ${input.hash.toString('hex')}`);
+      console.log(
+        `      hash (reversed/txid): ${Buffer.from(input.hash).reverse().toString('hex')}`
+      );
+      console.log(`      index: ${input.index}`);
+      console.log(`      sequence: ${input.sequence}`);
+    });
+    console.log('  Raw CET outputs:', rawCetBtc.outs.length);
+    rawCetBtc.outs.forEach((output, i) => {
+      console.log(
+        `    Output ${i}: ${output.value} sats, script: ${output.script.toString('hex')}`
+      );
+    });
+
+    // Also log what the fund tx txid looks like
+    const fundTxRawBytes = dlcState.transactions.fundTx.serialize();
+    const fundTxBtc = btcTransaction.fromBuffer(fundTxRawBytes);
+    console.log('🔍 Fund TX info:');
+    console.log('  Fund TX txid (bitcoinjs):', fundTxBtc.getId());
+    console.log('  Fund TX txid (node-dlc):', dlcState.transactions.fundTx.txId.toString());
+    console.log('  Fund TX vout:', dlcState.transactions.fundTxVout);
+
+    const cetForDdk = {
+      version: cet.version,
+      lockTime: cet.locktime.value,
+      inputs: cet.inputs.map((input: any) => ({
+        txid: input.outpoint.txid.serialize().toString('hex'),
+        vout: input.outpoint.outputIndex,
+        scriptSig: input.scriptSig?.serialize() || Buffer.alloc(0),
+        sequence: input.sequence?.value || 0xffffffff,
+        witness: input.witness || [],
+      })),
+      outputs: cet.outputs.map((output: any) => ({
+        value: BigInt(Math.round(output.value * 1e8)),
+        scriptPubkey: output.scriptPubKey.serialize(),
+      })),
+      rawBytes: cetRawBytes,
+    };
+
+    console.log('🔍 CET for DDK (converted):');
+    console.log('  Input 0 txid:', cetForDdk.inputs[0].txid);
+    console.log('  Input 0 vout:', cetForDdk.inputs[0].vout);
+
+    // Get the funding script (witness script)
+    const fundingScript = ddkJs.createFundTxLockingScript(
+      dlcState.offer.fundingPubkey,
+      dlcState.accept.fundingPubkey
+    );
+
+    // Get fund output value
+    const fundOutput = dlcState.transactions.fundTx.outputs[dlcState.transactions.fundTxVout];
+    const fundOutputValue = BigInt(Math.round(fundOutput.value * 1e8));
+
+    console.log('🔍 Computing sighash for Fordefi execution...');
+    const executionSighash = ddkJs.getCetSighash(cetForDdk, fundingScript, fundOutputValue);
+    console.log('  Execution sighash:', executionSighash.toString('hex'));
+    console.log('  Fund output value (sats):', fundOutputValue.toString());
+    console.log('  Funding script:', fundingScript.toString('hex'));
+    console.log('  CET txid:', cet.txId.toString());
+
+    // Decrypt server's adaptor signature using oracle signatures
+    console.log('🔍 Decrypting server adaptor signature...');
+    const serverDecryptedSig = ddkJs.extractEcdsaSignatureFromOracleSignatures(
+      oracleAttestation.signatures,
+      fullAdaptorSig
+    );
+
+    console.log('  Server decrypted ECDSA sig:', Buffer.from(serverDecryptedSig).toString('hex'));
+    console.log('  Server decrypted sig length:', serverDecryptedSig.length);
+
+    // Parse Fordefi's signature
+    let fordefiSigBuffer = Buffer.from(fordefiSignature, 'hex');
+    console.log('🔍 Fordefi signature:');
+    console.log('  Fordefi sig hex:', fordefiSigBuffer.toString('hex'));
+    console.log('  Fordefi sig length:', fordefiSigBuffer.length);
+
+    // Strip sighash byte from Fordefi signature if present (ends with 01)
+    // PSBT partialSig should not include sighash byte
+    if (fordefiSigBuffer[fordefiSigBuffer.length - 1] === 0x01) {
+      console.log('  Stripping sighash byte from Fordefi signature');
+      fordefiSigBuffer = fordefiSigBuffer.subarray(0, fordefiSigBuffer.length - 1);
+      console.log('  Fordefi sig without sighash:', fordefiSigBuffer.toString('hex'));
+    }
+
+    console.log('🔍 CET:', cet.txId.toString());
+
+    // Get pubkeys
+    const offerPubkey = dlcState.offer.fundingPubkey;
+    const acceptPubkey = dlcState.accept.fundingPubkey;
+
+    // Pubkeys are sorted lexicographically in 2-of-2 multisig
+    const offerFirst = Buffer.compare(offerPubkey, acceptPubkey) < 0;
+
+    console.log('🔍 Pubkey ordering:');
+    console.log('  Offer pubkey:', offerPubkey.toString('hex'));
+    console.log('  Accept pubkey:', acceptPubkey.toString('hex'));
+    console.log('  Offer pubkey first:', offerFirst);
+
+    // Create the 2-of-2 multisig payment variant (same as in BitcoinDdkProvider)
+    const fundingPubKeys = offerFirst ? [offerPubkey, acceptPubkey] : [acceptPubkey, offerPubkey];
+
+    const p2ms = payments.p2ms({
+      m: 2,
+      pubkeys: fundingPubKeys,
+      network,
+    });
+
+    const paymentVariant = payments.p2wsh({
+      redeem: p2ms,
+      network,
+    });
+
+    console.log('🔍 Payment variant:');
+    console.log('  P2WSH output script:', paymentVariant.output?.toString('hex'));
+    console.log('  Witness script:', paymentVariant.redeem?.output?.toString('hex'));
+
+    // Fund output value for PSBT (as number, not BigInt)
+    const fundOutputValueNum = Number(fundOutputValue);
+
+    // Parse the CET transaction using bitcoinjs-lib
+    const cetTx = btcTransaction.fromBuffer(cetRawBytes);
+
+    console.log('🔍 CET transaction:');
+    console.log('  Version:', cetTx.version);
+    console.log('  Locktime:', cetTx.locktime);
+    console.log('  Inputs:', cetTx.ins.length);
+    console.log('  Outputs:', cetTx.outs.length);
+
+    // Create PSBT from the CET
+    const psbt = new Psbt({ network });
+
+    // Add the funding input
+    psbt.addInput({
+      hash: dlcState.transactions.fundTx.txId.serialize(),
+      index: dlcState.transactions.fundTxVout,
+      sequence: cetTx.ins[0].sequence,
+      witnessUtxo: {
+        script: paymentVariant.output!,
+        value: fundOutputValueNum,
+      },
+      witnessScript: paymentVariant.redeem!.output,
+    });
+
+    // Add outputs from the CET
+    for (const output of cetTx.outs) {
+      psbt.addOutput({
+        script: output.script,
+        value: output.value,
+      });
+    }
+
+    // Set locktime
+    psbt.setLocktime(cetTx.locktime);
+
+    console.log('🔍 PSBT created with input and outputs');
+
+    // Add both partial signatures
+    // Fordefi's signature corresponds to offerPubkey
+    // Server's decrypted signature corresponds to acceptPubkey
+    // Signatures are already DER format - just append SIGHASH_ALL byte
+    const sighashByte = Buffer.from([0x01]); // SIGHASH_ALL
+    const partialSigs = [
+      {
+        pubkey: offerPubkey,
+        signature: Buffer.concat([fordefiSigBuffer, sighashByte]),
+      },
+      {
+        pubkey: acceptPubkey,
+        signature: Buffer.concat([Buffer.from(serverDecryptedSig), sighashByte]),
+      },
+    ];
+
+    console.log('🔍 Adding partial signatures:');
+    partialSigs.forEach((ps, i) => {
+      console.log(`  [${i}] pubkey: ${ps.pubkey.toString('hex')}`);
+      console.log(`  [${i}] signature: ${ps.signature.toString('hex')}`);
+    });
+
+    psbt.updateInput(0, { partialSig: partialSigs });
+
+    // Finalize the input
+    // Note: Signature validation will happen when broadcasting
+    psbt.finalizeAllInputs();
+
+    // Extract the final transaction
+    const finalTx = psbt.extractTransaction();
+    const finalTxHex = finalTx.toHex();
+    const txId = finalTx.getId();
+
+    console.log('✅ Final CET assembled using PSBT:');
+    console.log('  TX ID:', txId);
+    console.log('  TX Hex:', finalTxHex);
+
+    res.json({
+      txId,
+      txHex: finalTxHex,
+      success: true,
+      message: 'CET assembled with Fordefi signature and server decrypted adaptor sig',
+      debugInfo: {
+        outcomeIndex,
+        serverAdaptorSigHex: fullAdaptorSig.toString('hex'),
+        serverDecryptedSigHex: Buffer.from(serverDecryptedSig).toString('hex'),
+        fordefiSigHex: fordefiSigBuffer.toString('hex'),
+        offerPubkeyFirst: offerFirst,
+        witnessScriptHex: paymentVariant.redeem?.output?.toString('hex') || '',
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ Execute with Fordefi failed:', error);
+    console.error('Stack:', error.stack);
+    res.status(500).json({
+      error: 'Failed to execute DLC with Fordefi',
       details: error.message,
     });
   }

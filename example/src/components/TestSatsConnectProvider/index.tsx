@@ -77,6 +77,21 @@ export function TestSatsConnectProvider() {
     error?: string;
   }>({ isLoading: false });
 
+  const [executeFordefiState, setExecuteFordefiState] = useState<{
+    isLoading: boolean;
+    txId?: string;
+    txHex?: string;
+    error?: string;
+    debugInfo?: {
+      outcomeIndex: number;
+      serverAdaptorSigHex: string;
+      serverDecryptedSigHex: string;
+      fordefiSigHex: string;
+      offerPubkeyFirst: boolean;
+      witnessScriptHex: string;
+    };
+  }>({ isLoading: false });
+
   const { refetch, error, data, isFetching, isError, isSuccess } = useQuery({
     queryKey: ['testSatsConnectProvider'],
     queryFn: async () => {
@@ -372,6 +387,84 @@ export function TestSatsConnectProvider() {
       });
     } catch (error: unknown) {
       setExecuteDirectState({
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  };
+
+  // Execute with Fordefi - Fordefi signs CET via signPsbt, server decrypts adaptor sig
+  const handleExecuteWithFordefi = async () => {
+    if (!data?.contractId || !data?.dlcOffer || !data?.dlcAcceptHex || !data?.dlcTransactionsHex) {
+      setExecuteFordefiState({ isLoading: false, error: 'Missing DLC data' });
+      return;
+    }
+
+    setExecuteFordefiState({ isLoading: true });
+
+    try {
+      const dlcAccept = DlcAccept.deserialize(Buffer.from(data.dlcAcceptHex, 'hex'));
+      const dlcTransactions = DlcTransactions.deserialize(
+        Buffer.from(data.dlcTransactionsHex, 'hex'),
+      );
+
+      // The attested outcome maps to CET index 0 (trump wins = index 0)
+      const outcomeIndex = 0;
+
+      console.log('🔍 Execute with Fordefi:');
+      console.log('  Outcome index:', outcomeIndex);
+      console.log('  Attested outcome:', oracleAttestation.outcomes[0]);
+
+      // 2. Sign CET with Fordefi using signPsbt
+      const fordefiSig = await provider.signCetForExecution(
+        data.dlcOffer,
+        dlcAccept,
+        dlcTransactions,
+        outcomeIndex,
+      );
+
+      console.log('  Fordefi signature:', fordefiSig.toString('hex'));
+
+      // 3. Send to backend to combine with server's decrypted adaptor sig
+      const response = await fetch('http://localhost:3005/api/dlc/execute-with-fordefi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contractId: data.contractId,
+          oracleAttestationHex: oracleAttestation.serialize().toString('hex'),
+          fordefiSignature: fordefiSig.toString('hex'),
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error: string; details?: string };
+        throw new Error(`Backend error: ${errorData.error} - ${errorData.details ?? ''}`);
+      }
+
+      const result = (await response.json()) as {
+        txId: string;
+        txHex: string;
+        debugInfo?: {
+          outcomeIndex: number;
+          serverAdaptorSigHex: string;
+          serverDecryptedSigHex: string;
+          fordefiSigHex: string;
+          offerPubkeyFirst: boolean;
+          witnessScriptHex: string;
+        };
+      };
+
+      console.log('✅ Execute with Fordefi result:', result);
+
+      setExecuteFordefiState({
+        isLoading: false,
+        txId: result.txId,
+        txHex: result.txHex,
+        debugInfo: result.debugInfo,
+      });
+    } catch (error: unknown) {
+      console.error('❌ Execute with Fordefi failed:', error);
+      setExecuteFordefiState({
         isLoading: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -891,6 +984,17 @@ export function TestSatsConnectProvider() {
                                 ? 'Direct Executing...'
                                 : 'Execute Direct (Skip Verify)'}
                             </Button>
+                            <Button
+                              onClick={() => {
+                                handleExecuteWithFordefi().catch(console.error);
+                              }}
+                              disabled={executeFordefiState.isLoading}
+                              style={{ backgroundColor: '#4CAF50' }}
+                            >
+                              {executeFordefiState.isLoading
+                                ? 'Signing with Fordefi...'
+                                : 'Execute with Fordefi'}
+                            </Button>
                           </div>
                           {executeState.error && (
                             <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
@@ -917,6 +1021,48 @@ export function TestSatsConnectProvider() {
                               >
                                 TX Hex: {executeDirectState.txHex?.substring(0, 100)}...
                               </div>
+                            </div>
+                          )}
+                          {executeFordefiState.error && (
+                            <div style={{ color: '#d73a49', marginTop: '0.5rem' }}>
+                              <strong>Fordefi Execute Error:</strong> {executeFordefiState.error}
+                            </div>
+                          )}
+                          {executeFordefiState.txId && (
+                            <div style={{ color: '#28a745', marginTop: '0.5rem' }}>
+                              <strong>✅ Fordefi Execution Succeeded!</strong>
+                              <div style={{ fontSize: '0.8em', marginTop: '0.25rem' }}>
+                                TX ID: {executeFordefiState.txId}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: '0.7em',
+                                  marginTop: '0.25rem',
+                                  wordBreak: 'break-all',
+                                }}
+                              >
+                                TX Hex: {executeFordefiState.txHex?.substring(0, 100)}...
+                              </div>
+                              {executeFordefiState.debugInfo && (
+                                <details style={{ marginTop: '0.5rem' }}>
+                                  <summary style={{ cursor: 'pointer', fontWeight: 'bold' }}>
+                                    Debug Info
+                                  </summary>
+                                  <pre
+                                    style={{
+                                      backgroundColor: '#1a1a1a',
+                                      padding: '0.5rem',
+                                      borderRadius: '4px',
+                                      fontSize: '0.7em',
+                                      overflow: 'auto',
+                                      maxHeight: '200px',
+                                      marginTop: '0.25rem',
+                                    }}
+                                  >
+                                    {JSON.stringify(executeFordefiState.debugInfo, null, 2)}
+                                  </pre>
+                                </details>
+                              )}
                             </div>
                           )}
                           {executeState.txId && (
