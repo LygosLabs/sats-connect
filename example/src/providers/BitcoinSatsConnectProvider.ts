@@ -715,58 +715,18 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const cetSigs: any[] = [];
 
-        for (let i = 0; i < signResult.cetTransactions.length; i++) {
-          const base64AdaptorSig = signResult.cetTransactions[i];
+        for (const base64AdaptorSig of signResult.cetTransactions) {
           // Decode the base64 adaptor signature
           const adaptorSignature = Buffer.from(base64AdaptorSig, 'base64');
 
-          console.log(`CET ${i} Adaptor Signature Debug:`);
-          console.log(`Total length: ${adaptorSignature.length} bytes`);
-          console.log(`Full hex: ${adaptorSignature.toString('hex')}`);
-
-          // Fordefi returns 162-byte adaptor signatures in format:
-          //   [R(33)][Ra(33)][Sa(32)][B(32)][C(32)]
-          // secp256k1-zkp EcdsaAdaptorSignature format (used by ddk-ffi):
-          //   [Ra(33)][Sa(32)][R(33)][e(32)][s(32)] = 162 bytes
-          // Note: B=e and C=s in the DLEQ proof
-          //
-          // DDK internal storage: encryptedSig = full 162 bytes, dleqProof = empty
-          // This matches how BitcoinDdkProvider stores adaptor signatures
-          if (adaptorSignature.length === 162) {
-            const R = adaptorSignature.subarray(0, 33); // bytes 0-32: R (commitment point)
-            const Ra = adaptorSignature.subarray(33, 66); // bytes 33-65: Ra (adapted R)
-            const Sa = adaptorSignature.subarray(66, 98); // bytes 66-97: Sa (adapted s)
-            const B = adaptorSignature.subarray(98, 130); // bytes 98-129: B (DLEQ proof e)
-            const C = adaptorSignature.subarray(130, 162); // bytes 130-161: C (DLEQ proof s)
-
-            // Reorder to secp256k1-zkp format: Ra, Sa, R, B, C
-            const reorderedSig = Buffer.concat([Ra, Sa, R, B, C]); // 162 bytes
-
-            console.log(`Converted Fordefi adaptor sig to secp256k1-zkp format:`);
-            console.log(`  Original (Fordefi):  R, Ra, Sa, B, C`);
-            console.log(`  Reordered (ddk-ffi): Ra, Sa, R, B, C`);
-            console.log(`  Full 162-byte sig: ${reorderedSig.toString('hex')}`);
-
-            // DDK internal format: store full 162 bytes in encryptedSig, empty dleqProof
-            cetSigs.push({
-              encryptedSig: reorderedSig,
-              dleqProof: Buffer.alloc(0),
-            });
-          } else {
-            console.warn(
-              `Unexpected adaptor signature length: ${adaptorSignature.length} (expected 162)`,
-            );
-            // Fallback: store as-is (may not work correctly)
-            cetSigs.push({
-              encryptedSig: adaptorSignature,
-              dleqProof: Buffer.alloc(0),
-            });
-          }
-
-          console.log('---');
+          // Store the full adaptor signature in encryptedSig (matching DDK provider format)
+          // The 162-byte signature contains both the encrypted sig and DLEQ proof
+          // DO NOT reorder - the signature is already in the correct format from DDK
+          cetSigs.push({
+            encryptedSig: adaptorSignature, // Full 162 bytes as-is
+            dleqProof: Buffer.alloc(0), // Empty, proof is included in encryptedSig
+          });
         }
-
-        console.log(`Extracted ${cetSigs.length} CET adaptor signatures`);
 
         // Try to set the sigs property - this may need adjustment based on actual structure
         // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access

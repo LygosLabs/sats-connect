@@ -1,3 +1,5 @@
+import { Client } from '@atomicfinance/client';
+import { BitcoinEsploraApiProvider } from '@atomicfinance/bitcoin-esplora-api-provider';
 import {
   DlcAccept,
   DlcOffer,
@@ -10,7 +12,13 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Button, Card } from '../../App.styles';
-import { BitcoinSatsConnectProvider, type SatsConnectAddress } from '../../providers';
+import {
+  BitcoinSatsConnectProvider,
+  DdkBackendClient,
+  SatsConnectWalletAdapter,
+  type Input,
+  type SatsConnectAddress,
+} from '../../providers';
 import { ErrorMessage } from '../common';
 
 export function TestSatsConnectProvider() {
@@ -42,7 +50,44 @@ export function TestSatsConnectProvider() {
     ),
   );
 
-  const [provider] = useState(() => new BitcoinSatsConnectProvider());
+  // Create wallet adapter, esplora provider, and backend client
+  const [walletAdapter] = useState(() => new SatsConnectWalletAdapter());
+  const [backendClient] = useState(() => new DdkBackendClient());
+  const [esploraProvider] = useState(
+    () =>
+      new BitcoinEsploraApiProvider({
+        batchUrl: 'https://mempool.space/testnet4/api',
+        url: 'https://mempool.space/testnet4/api',
+        network: {
+          name: 'bitcoin_testnet',
+          coinType: '1',
+          isTestnet: true,
+          messagePrefix: '\x18Bitcoin Signed Message:\n',
+          bech32: 'tb',
+          bip32: { public: 0x043587cf, private: 0x04358394 },
+          pubKeyHash: 0x6f,
+          scriptHash: 0xc4,
+          wif: 0xef,
+        },
+        numberOfBlockConfirmation: 1,
+      }),
+  );
+
+  // Create client and wire up providers so they can use getMethod
+  const [client] = useState(() => {
+    const c = new Client();
+    c.addProvider(esploraProvider);
+    return c;
+  });
+
+  const [provider] = useState(() => {
+    const p = new BitcoinSatsConnectProvider({
+      wallet: walletAdapter,
+    });
+    // Add provider to client so it can use getMethod('getRawTransactionByHash')
+    client.addProvider(p);
+    return p;
+  });
 
   const [finalizeState, setFinalizeState] = useState<{
     isLoading: boolean;
@@ -115,6 +160,27 @@ export function TestSatsConnectProvider() {
         console.log('  Total collateral:', contractInfo.totalCollateral.toString(), 'sats');
         console.log('  Serialized:', contractInfo.serialize().toString('hex'));
 
+        // Step 0: Fetch UTXOs for the payment address
+        console.log('🔍 Fetching UTXOs for payment address...');
+        const utxos = await esploraProvider.getUnspentTransactions([paymentAddress.address]);
+        console.log('  Found UTXOs:', utxos.length);
+
+        // Convert esplora UTXOs to Input format with txHex
+        const fixedInputs: Input[] = await Promise.all(
+          utxos.map(async (utxo) => {
+            const txHex = await esploraProvider.getRawTransactionByHash(utxo.txid);
+            return {
+              txid: utxo.txid,
+              vout: utxo.vout,
+              address: paymentAddress.address,
+              value: utxo.value,
+              txHex,
+            };
+          }),
+        );
+
+        console.log('  Fixed inputs prepared:', fixedInputs.length);
+
         // Step 1: Create DLC offer using SatsConnect provider
         dlcOffer = await provider.createDlcOffer(
           contractInfo,
@@ -122,37 +188,19 @@ export function TestSatsConnectProvider() {
           3n, // 3 sats/vB fee rate
           Math.floor(Date.now() / 1000) + 3600, // CET locktime: 1 hour from now
           Math.floor(Date.now() / 1000) + 86400, // Refund locktime: 24 hours from now
+          fixedInputs, // Pass the fetched UTXOs as fixed inputs
         );
 
         console.log('DLC offer:', dlcOffer);
 
         // Step 2: Send DLC offer to backend for acceptance using DDK
-        const backendResponse = await fetch('http://localhost:3005/api/dlc/accept', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            dlcOfferHex: dlcOffer.serialize().toString('hex'),
-          }),
-        });
+        const acceptResponse = await backendClient.acceptDlcOffer(
+          dlcOffer.serialize().toString('hex'),
+        );
 
-        if (!backendResponse.ok) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-          const errorData = await backendResponse.json();
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          throw new Error(`Backend error: ${errorData.error}`);
-        }
-
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const acceptResponse = await backendResponse.json();
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         dlcAcceptHex = acceptResponse.dlcAcceptHex;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         dlcTransactionsHex = acceptResponse.dlcTransactionsHex;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         adaptorPoints = acceptResponse.adaptorPoints;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         contractId = acceptResponse.contractId;
 
         if (dlcAcceptHex && dlcTransactionsHex && adaptorPoints) {
@@ -161,13 +209,8 @@ export function TestSatsConnectProvider() {
             Buffer.from(dlcTransactionsHex, 'hex'),
           );
 
-          dlcSign = await provider.signDlcAccept(
-            dlcOffer,
-            dlcAccept,
-            dlcTransactions,
-            adaptorPoints,
-            contractId ?? undefined,
-          );
+          const signResult = await provider.signDlcAccept(dlcOffer, dlcAccept, dlcTransactions);
+          dlcSign = signResult.dlcSign;
         }
 
         // Output DLC messages as JSON for inspection

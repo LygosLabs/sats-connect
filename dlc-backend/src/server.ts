@@ -1468,6 +1468,41 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
 });
 
 /**
+ * Compute tagged attestation message hash
+ * DLC spec: H(tagHash || tagHash || outcome)
+ * where tagHash = SHA256("DLC/oracle/attestation/v0")
+ */
+function computeTaggedAttestationMessage(outcome: string): Buffer {
+  const crypto = require('crypto');
+  const tag = 'DLC/oracle/attestation/v0';
+  const tagHash = crypto.createHash('sha256').update(tag).digest();
+  const message = Buffer.concat([tagHash, tagHash, Buffer.from(outcome, 'utf8')]);
+  return crypto.createHash('sha256').update(message).digest();
+}
+
+/**
+ * Generate messages for adaptor points from oracle event outcomes
+ * This extracts raw outcome strings from the oracle announcement and hashes them
+ */
+function generateMessagesForAdaptorPoints(oracleInfo: SingleOracleInfo): {
+  rawOutcomes: string[];
+  hashedMessages: Buffer[][][];
+} {
+  const eventDescriptor = oracleInfo.announcement.oracleEvent.eventDescriptor;
+
+  // Get raw outcomes from oracle event (these are the strings the oracle will attest to)
+  const rawOutcomes: string[] = (eventDescriptor as any).outcomes || [];
+
+  // Hash each outcome using the DLC tagged attestation format
+  const hashedMessages: Buffer[][][] = rawOutcomes.map((outcome) => {
+    const hashedMessage = computeTaggedAttestationMessage(outcome);
+    return [[hashedMessage]];
+  });
+
+  return { rawOutcomes, hashedMessages };
+}
+
+/**
  * Calculate adaptor points from DLC offer
  * POST /api/dlc/adaptor-points
  * Body: { dlcOfferHex: string }
@@ -1491,17 +1526,17 @@ app.post('/api/dlc/adaptor-points', async (req, res) => {
     const oraclePublicKey = oracleInfo.announcement.oraclePublicKey;
     const oracleNonces = oracleInfo.announcement.getNonces();
 
-    // Generate messages using DDK
-    const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(oracleInfo);
-    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
-
-    // Transform msgsForDdk structure: flatten the nested messages into separate arrays
-    const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
+    // Generate messages directly from oracle event outcomes
+    const { rawOutcomes, hashedMessages } = generateMessagesForAdaptorPoints(oracleInfo);
 
     console.log('🔍 Adaptor Point Calculation:');
     console.log('  Oracle public key:', oraclePublicKey.toString('hex'));
     console.log('  Oracle nonces count:', oracleNonces.length);
-    console.log('  Messages count:', transformedMsgsForDdk.length);
+    console.log('  Raw outcomes from oracle event:', rawOutcomes);
+    console.log('  Hashed messages count:', hashedMessages.length);
+    hashedMessages.forEach((msg, i) => {
+      console.log(`  Message ${i} (${rawOutcomes[i]}): ${msg[0][0].toString('hex')}`);
+    });
 
     // Calculate adaptor points using DDK
     const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
@@ -1511,13 +1546,17 @@ app.post('/api/dlc/adaptor-points', async (req, res) => {
           nonces: oracleNonces,
         },
       ],
-      transformedMsgsForDdk
+      hashedMessages
     );
 
     console.log('  Adaptor points calculated:', adaptorPoints.length);
+    adaptorPoints.forEach((point: Buffer, i: number) => {
+      console.log(`  Point ${i}: ${point.toString('hex')}`);
+    });
 
     res.json({
       adaptorPoints: adaptorPoints.map((point: Buffer) => point.toString('base64')),
+      rawOutcomes,
       success: true,
     });
   } catch (error: any) {

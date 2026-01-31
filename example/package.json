@@ -17,7 +17,9 @@
     "prepare": "cd .. && npm i && npm run build && cd example"
   },
   "dependencies": {
+    "@atomicfinance/bitcoin-esplora-api-provider": "^4.2.7",
     "@atomicfinance/bitcoin-js-wallet-provider": "^4.2.7",
+    "@atomicfinance/client": "^4.2.7",
     "@atomicfinance/provider": "^4.2.7",
     "@atomicfinance/types": "^4.2.7",
     "@mantine/core": "^8.2.1",
