@@ -544,7 +544,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
       // Always fetch adaptor points from backend for consistency
       console.log('🔍 Fetching adaptor points from backend for validation...');
-      const backendAdaptorPoints = await this.getAdaptorPoints(dlcOffer);
+      const backendAdaptorPoints = await this.getAdaptorPoints(dlcOffer, dlcAccept);
 
       // If adaptor points were provided (from accept response), validate they match
       if (adaptorPoints) {
@@ -732,7 +732,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
           //
           // DDK internal storage: encryptedSig = full 162 bytes, dleqProof = empty
           // This matches how BitcoinDdkProvider stores adaptor signatures
-          if (adaptorSignature.length === 162) {
+          if (adaptorSignature.length === 161) {
             const R = adaptorSignature.subarray(0, 33); // bytes 0-32: R (commitment point)
             const Ra = adaptorSignature.subarray(33, 66); // bytes 33-65: Ra (adapted R)
             const Sa = adaptorSignature.subarray(66, 98); // bytes 66-97: Sa (adapted s)
@@ -988,7 +988,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
    * @param dlcOffer - The DLC offer containing oracle information
    * @return {Promise<string[]>} Array of adaptor points as base64 strings
    */
-  async getAdaptorPoints(dlcOffer: DlcOffer): Promise<string[]> {
+  async getAdaptorPoints(dlcOffer: DlcOffer, dlcAccept: DlcAccept): Promise<string[]> {
     try {
       console.log('🔍 Fetching adaptor points from backend...');
 
@@ -999,6 +999,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         },
         body: JSON.stringify({
           dlcOfferHex: dlcOffer.serialize().toString('hex'),
+          dlcAcceptHex: dlcAccept.serialize().toString('hex'),
         }),
       });
 

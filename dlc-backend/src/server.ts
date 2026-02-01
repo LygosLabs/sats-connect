@@ -188,8 +188,8 @@ app.post('/api/dlc/accept', async (req, res) => {
       throw acceptError;
     }
     const dlcAccept = acceptDlcOfferResponse.dlcAccept;
-    dlcAccept.changeSpk = address.toOutputScript(firstAddress.address, network);
-    dlcAccept.payoutSpk = address.toOutputScript(firstAddress.address, network);
+    // dlcAccept.changeSpk = address.toOutputScript(firstAddress.address, network);
+    // dlcAccept.payoutSpk = address.toOutputScript(firstAddress.address, network);
     const dlcTransactions = acceptDlcOfferResponse.dlcTransactions;
 
     // The contract ID is already computed by acceptDlcOffer and set on dlcTransactions
@@ -211,13 +211,18 @@ app.post('/api/dlc/accept', async (req, res) => {
       (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
     ).announcement.getNonces();
 
-    const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(
-      (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
-    );
+    // const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(
+    //   (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
+    // );
+    const { messagesList } = await bitcoinWithDdk.getMethod('createDlcTxs')(dlcOffer, dlcAccept);
+    console.log('messagesList', messagesList);
 
-    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
+    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(messagesList);
 
-    // Transform msgsForDdk structure: flatten the nested messages into separate arrays
+    // Transform msgsForDdk structure: wrap each outcome's message for DDK format
+    // msgsForDdk structure: [oracle][outcomes_array] = [ [[hash1, hash2, hash3]] ]
+    // We need: [outcome][oracle][nonce] = [ [[hash1]], [[hash2]], [[hash3]] ]
+    // So map over msgsForDdk[0][0] (the array of all outcome hashes)
     const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
 
     console.log('\n🔍 Oracle & Message Debug Info:');
@@ -227,23 +232,62 @@ app.post('/api/dlc/accept', async (req, res) => {
       oracleNonces.map((n: Buffer) => n.toString('hex'))
     );
     console.log('Number of messages (outcomes):', transformedMsgsForDdk.length);
-    console.log(
-      'Raw enumMessages structure:',
-      JSON.stringify(
-        enumMessages.map((m: any) =>
-          m.msgs ? m.msgs.map((msg: Buffer) => msg.toString('hex')) : m
-        )
-      )
-    );
+    // console.log(
+    //   'Raw enumMessages structure:',
+    //   JSON.stringify(
+    //     enumMessages.map((m: any) =>
+    //       m.msgs ? m.msgs.map((msg: Buffer) => msg.toString('hex')) : m
+    //     )
+    //   )
+    // );
     console.log(
       'msgsForDdk structure depth:',
       `[${msgsForDdk.length}][${msgsForDdk[0]?.length}][${msgsForDdk[0]?.[0]?.length}]`
     );
+    console.log('msgsForDdk full structure analysis:');
+    console.log('  msgsForDdk[0] is array?', Array.isArray(msgsForDdk[0]));
+    console.log('  msgsForDdk[0] length:', msgsForDdk[0]?.length);
+    console.log('  msgsForDdk[0][0] is array?', Array.isArray(msgsForDdk[0]?.[0]));
+    console.log('  msgsForDdk[0][0] length:', msgsForDdk[0]?.[0]?.length);
+
+    console.log('All outcome hashes (msgsForDdk[0][0]):');
+    if (Array.isArray(msgsForDdk[0]?.[0])) {
+      msgsForDdk[0][0].forEach((msg: Buffer, idx: number) => {
+        console.log(`  Outcome ${idx}:`, msg.toString('hex'));
+      });
+    } else {
+      console.log('  ERROR: Not an array!', msgsForDdk[0]?.[0]);
+    }
 
     // Log each message for adaptor point calculation
+    console.log('transformedMsgsForDdk (wrapped for DDK):');
+    console.log('  Length:', transformedMsgsForDdk.length);
+    console.log('  Structure per CET:');
     transformedMsgsForDdk.forEach((msgWrapper: Buffer[][], index: number) => {
-      console.log(`  Message ${index}:`, msgWrapper[0][0].toString('hex'));
+      console.log(`    CET ${index}:`, {
+        isArray: Array.isArray(msgWrapper),
+        length: msgWrapper?.length,
+        firstElementIsArray: Array.isArray(msgWrapper?.[0]),
+        firstElementLength: msgWrapper?.[0]?.length,
+        messageHash: msgWrapper?.[0]?.[0]?.toString('hex'),
+      });
     });
+
+    console.log('\n🔍 Calling createCetAdaptorPointsFromOracleInfo with:');
+    console.log('  Oracle count:', 1);
+    console.log(
+      '  Messages structure:',
+      JSON.stringify({
+        type: 'Buffer[][][]',
+        outerLength: transformedMsgsForDdk.length,
+        sampleStructure: transformedMsgsForDdk[0]
+          ? {
+              middleLength: transformedMsgsForDdk[0].length,
+              innerLength: transformedMsgsForDdk[0][0]?.length,
+            }
+          : null,
+      })
+    );
 
     const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
       [
@@ -252,7 +296,8 @@ app.post('/api/dlc/accept', async (req, res) => {
           nonces: oracleNonces,
         },
       ],
-      transformedMsgsForDdk
+      msgsForDdk
+      // transformedMsgsForDdk
     );
 
     console.log('\n🔑 Adaptor Points (sent to Fordefi):');
@@ -597,36 +642,64 @@ app.post('/api/dlc/finalize', async (req, res) => {
       console.log(`Fund output index: ${dlcState.transactions.fundTxVout}`);
 
       // Use DDK client to finalize and broadcast with step-by-step debugging
-      // console.log('🔍 Step 1: Calling VerifyCetAdaptorAndRefundSigs...');
-      // try {
-      //   await bitcoinWithDdk.getMethod('VerifyCetAdaptorAndRefundSigs')(
-      //     dlcState.offer,
-      //     dlcState.accept,
-      //     dlcSign,
-      //     dlcState.transactions,
-      //     [], // messagesList - will be generated internally
-      //     false // isOfferer = false (we're the accepter)
-      //   );
-      //   console.log('✅ Step 1: CET adaptor and refund signature verification passed');
-      // } catch (step1Error) {
-      //   console.error('❌ Step 1: CET adaptor signature verification failed:', step1Error);
-      //   throw new Error(`CET verification failed: ${step1Error.message}`);
-      // }
+      console.log('🔍 Step 1: Calling VerifyCetAdaptorAndRefundSigs...');
+      try {
+        const { dlcTransactions, messagesList } = await bitcoinWithDdk.getMethod('createDlcTxs')(
+          dlcState.offer,
+          dlcState.accept
+        );
 
-      // console.log('🔍 Step 2: Calling VerifyFundingSigsAlt...');
-      // try {
-      //   await bitcoinWithDdk.getMethod('VerifyFundingSigsAlt')(
-      //     dlcState.offer,
-      //     dlcState.accept,
-      //     dlcSign,
-      //     dlcState.transactions,
-      //     false // isOfferer = false (we're the accepter)
-      //   );
-      //   console.log('✅ Step 2: Funding signature verification passed');
-      // } catch (step2Error) {
-      //   console.error('❌ Step 2: Funding signature verification failed:', step2Error);
-      //   throw new Error(`Funding signature verification failed: ${step2Error.message}`);
-      // }
+        await bitcoinWithDdk.getMethod('VerifyCetAdaptorAndRefundSigs')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcSign,
+          dlcState.transactions,
+          messagesList, // messagesList - will be generated internally
+          true // isOfferer = false (we're the accepter)
+        );
+        console.log('✅ Step 1: CET adaptor and refund signature verification passed');
+      } catch (step1Error) {
+        console.error(
+          '❌ Step 1: CET adaptor signature verification failed with offerer:',
+          step1Error
+        );
+      }
+
+      try {
+        const { dlcTransactions, messagesList } = await bitcoinWithDdk.getMethod('createDlcTxs')(
+          dlcState.offer,
+          dlcState.accept
+        );
+
+        await bitcoinWithDdk.getMethod('VerifyCetAdaptorAndRefundSigs')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcSign,
+          dlcState.transactions,
+          messagesList, // messagesList - will be generated internally
+          false // isOfferer = false (we're the accepter)
+        );
+        console.log('✅ Step 1: CET adaptor and refund signature verification passed');
+      } catch (step1Error) {
+        console.error(
+          '❌ Step 1: CET adaptor signature verification failed with accepter:',
+          step1Error
+        );
+      }
+
+      console.log('🔍 Step 2: Calling VerifyFundingSigs...');
+      try {
+        await bitcoinWithDdk.getMethod('VerifyFundingSigs')(
+          dlcState.offer,
+          dlcState.accept,
+          dlcSign,
+          dlcState.transactions,
+          false // isOfferer = false (we're the accepter)
+        );
+        console.log('✅ Step 2: Funding signature verification passed');
+      } catch (step2Error) {
+        console.error('❌ Step 2: Funding signature verification failed:', step2Error);
+      }
 
       // Skip individual steps and use the working finalizeDlcSign method directly
       console.log('🔍 Calling finalizeDlcSign directly (bypassing buggy verification steps)...');
@@ -640,7 +713,21 @@ app.post('/api/dlc/finalize', async (req, res) => {
     } catch (finalizeError) {
       console.error('❌ finalizeDlcSign error:', finalizeError);
       console.error('Full error stack:', finalizeError.stack);
-      throw finalizeError;
+
+      const fundingSignatures = await bitcoinWithDdk.getMethod('CreateFundingSigs')(
+        dlcState.offer,
+        dlcState.accept,
+        dlcState.transactions,
+        false
+      );
+
+      fundTx = await bitcoinWithDdk.getMethod('CreateFundingTx')(
+        dlcState.offer,
+        dlcState.accept,
+        dlcSign,
+        dlcState.transactions,
+        fundingSignatures
+      );
     }
 
     // TODO: Add actual broadcasting when connected to Bitcoin node
@@ -826,7 +913,7 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
       // Validate funding signatures before finalization
       console.log('🔍 Manual Funding Signature Validation:');
       try {
-        await bitcoinWithDdk.getMethod('VerifyFundingSigsAlt')(
+        await bitcoinWithDdk.getMethod('VerifyFundingSigs')(
           dlcOffer,
           dlcAccept,
           dlcSign,
@@ -840,14 +927,31 @@ app.post('/api/dlc/manual-finalize', async (req, res) => {
         throw new Error(`Funding signature validation failed: ${fundingSigError.message}`);
       }
 
-      // Use DDK client to finalize
-      fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
-        dlcOffer,
-        dlcAccept,
-        dlcSign,
-        createDlcTxsResponse.dlcTransactions
-      );
-      console.log('✅ Manual finalizeDlcSign completed successfully');
+      try {
+        // Use DDK client to finalize
+        fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
+          dlcOffer,
+          dlcAccept,
+          dlcSign,
+          createDlcTxsResponse.dlcTransactions
+        );
+        console.log('✅ Manual finalizeDlcSign completed successfully');
+      } catch (e) {
+        const fundingSignatures = await bitcoinWithDdk.getMethod('CreateFundingSigs')(
+          dlcOffer,
+          dlcAccept,
+          createDlcTxsResponse.dlcTransactions,
+          false
+        );
+
+        fundTx = await bitcoinWithDdk.getMethod('CreateFundingTx')(
+          dlcOffer,
+          dlcAccept,
+          dlcSign,
+          createDlcTxsResponse.dlcTransactions,
+          fundingSignatures
+        );
+      }
 
       // Debug the final transaction structure
       console.log('🔍 Final Transaction Debug:');
@@ -1076,6 +1180,9 @@ app.post('/api/dlc/execute', async (req, res) => {
     const oracleAttestation = OracleAttestation.deserialize(
       Buffer.from(oracleAttestationHex, 'hex')
     );
+
+    oracleAttestation.validate();
+    console.log('oracleAttestation valid');
 
     // Execute the DLC from acceptor's perspective (server is acceptor, not offerer)
     const isOfferer = false;
@@ -1475,14 +1582,19 @@ app.post('/api/dlc/execute-direct', async (req, res) => {
  */
 app.post('/api/dlc/adaptor-points', async (req, res) => {
   try {
-    const { dlcOfferHex } = req.body;
+    const { dlcOfferHex, dlcAcceptHex } = req.body;
 
     if (!dlcOfferHex) {
       return res.status(400).json({ error: 'dlcOfferHex is required' });
     }
 
+    if (!dlcAcceptHex) {
+      return res.status(400).json({ error: 'dlcAcceptHex is required' });
+    }
+
     // Deserialize the DLC offer
     const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
+    const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
 
     // Extract oracle info from contract info
     const contractInfo = dlcOffer.contractInfo as SingleContractInfo;
@@ -1491,12 +1603,24 @@ app.post('/api/dlc/adaptor-points', async (req, res) => {
     const oraclePublicKey = oracleInfo.announcement.oraclePublicKey;
     const oracleNonces = oracleInfo.announcement.getNonces();
 
-    // Generate messages using DDK
-    const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(oracleInfo);
-    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(enumMessages);
+    const { dlcTransactions, messagesList } = await bitcoinWithDdk.getMethod('createDlcTxs')(
+      dlcOffer,
+      dlcAccept
+    );
+    console.log('messagesList', messagesList);
 
-    // Transform msgsForDdk structure: flatten the nested messages into separate arrays
+    // Generate messages using DDK
+    // const enumMessages = await bitcoinWithDdk.getMethod('GenerateMessages')(oracleInfo);
+    // console.log('Enum Messages: ', enumMessages);
+    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(messagesList);
+    console.log('Messages for DDK format: ', msgsForDdk);
+
+    // Transform msgsForDdk structure: wrap each outcome's message for DDK format
+    // msgsForDdk structure: [oracle][outcomes_array] = [ [[hash1, hash2, hash3]] ]
+    // We need: [outcome][oracle][nonce] = [ [[hash1]], [[hash2]], [[hash3]] ]
+    // So map over msgsForDdk[0][0] (the array of all outcome hashes)
     const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
+    console.log('transformedMsgsForDdk', transformedMsgsForDdk);
 
     console.log('🔍 Adaptor Point Calculation:');
     console.log('  Oracle public key:', oraclePublicKey.toString('hex'));
@@ -1511,7 +1635,8 @@ app.post('/api/dlc/adaptor-points', async (req, res) => {
           nonces: oracleNonces,
         },
       ],
-      transformedMsgsForDdk
+      msgsForDdk
+      // transformedMsgsForDdk
     );
 
     console.log('  Adaptor points calculated:', adaptorPoints.length);
