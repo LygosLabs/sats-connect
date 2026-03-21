@@ -184,8 +184,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       // Validate contract info
       contractInfo.validate();
 
-      if (offerCollateralSatoshis <= 0n) {
-        throw new Error('Offer collateral must be greater than 0');
+      // Allow zero collateral for single-funded DLCs (where only the accepter provides funds)
+      if (offerCollateralSatoshis < 0n) {
+        throw new Error('Offer collateral cannot be negative');
       }
 
       if (offerCollateralSatoshis > contractInfo.totalCollateral) {
@@ -206,11 +207,15 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       dlcOffer.payoutSerialId = this.generateSerialId();
       dlcOffer.offerCollateral = offerCollateralSatoshis;
 
-      // Get UTXOs for funding (either provided or selected automatically)
-      const fundingUtxos =
-        fixedInputs ?? (await this.getUtxosForAmount(offerCollateralSatoshis + 10000n)); // Add some buffer for fees
+      // Get UTXOs for funding only if offerer is contributing collateral
+      // For single-funded DLCs (offerCollateralSatoshis === 0n), skip UTXO selection entirely
+      let fundingUtxos: Input[] = [];
+      if (offerCollateralSatoshis > 0n) {
+        fundingUtxos =
+          fixedInputs ?? (await this.getUtxosForAmount(offerCollateralSatoshis + 10000n)); // Add some buffer for fees
+      }
 
-      // Create funding inputs from UTXOs
+      // Create funding inputs from UTXOs (will be empty array for single-funded)
       dlcOffer.fundingInputs = fundingUtxos.map((input, index) => {
         const tx = Tx.decode(StreamReader.fromHex(input.txHex!));
         const fundingInput = new FundingInput();
@@ -584,15 +589,16 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       console.log(`  Input indexes: [${ourFundingInputIndexes.join(', ')}]`);
       console.log(`  Total offerer inputs: ${dlcOffer.fundingInputs.length}`);
 
+      // Build params - for single-funded DLCs, include fundingTransaction but with empty signInputs
+      // This tells Fordefi the PSBT structure without requiring any signatures from this vault
+      const hasFundingInputsToSign = ourFundingInputIndexes.length > 0;
+
       const params = {
         fundingTransaction: {
           psbt: fundingPsbt.toBase64(),
-          signInputs:
-            ourFundingInputIndexes.length > 0
-              ? {
-                  [firstAddress]: ourFundingInputIndexes,
-                }
-              : undefined,
+          // For single-funded DLCs: pass empty signInputs object (not undefined)
+          // This indicates the vault doesn't need to sign any inputs in the funding tx
+          signInputs: hasFundingInputsToSign ? { [firstAddress]: ourFundingInputIndexes } : {},
         },
         refundTransaction: {
           psbt: refundPsbt.toBase64(),

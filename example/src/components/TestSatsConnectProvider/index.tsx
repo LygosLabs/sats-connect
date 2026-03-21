@@ -44,6 +44,9 @@ export function TestSatsConnectProvider() {
 
   const [provider] = useState(() => new BitcoinSatsConnectProvider());
 
+  // Single-funded mode: offerer (lender) has zero inputs, only accepter (borrower) provides collateral
+  const [singleFundedMode, setSingleFundedMode] = useState(false);
+
   const [finalizeState, setFinalizeState] = useState<{
     isLoading: boolean;
     txId?: string;
@@ -116,9 +119,17 @@ export function TestSatsConnectProvider() {
         console.log('  Serialized:', contractInfo.serialize().toString('hex'));
 
         // Step 1: Create DLC offer using SatsConnect provider
+        // In single-funded mode, offerer contributes 0 sats (lender scenario)
+        // In dual-funded mode, offerer contributes 50% of total collateral
+        const offerCollateral = singleFundedMode ? 0n : 50000n;
+        console.log(
+          `🔍 Creating DLC offer with ${singleFundedMode ? 'SINGLE-FUNDED' : 'DUAL-FUNDED'} mode`,
+        );
+        console.log(`   Offer collateral: ${offerCollateral.toString()} sats`);
+
         dlcOffer = await provider.createDlcOffer(
           contractInfo,
-          50000n, // Offer 50,000 sats (50% of total 100,000 sats)
+          offerCollateral,
           3n, // 3 sats/vB fee rate
           Math.floor(Date.now() / 1000) - 3600 * 15, // CET locktime: 15 hours ago
           Math.floor(Date.now() / 1000) + 86400, // Refund locktime: 24 hours from now
@@ -481,6 +492,26 @@ export function TestSatsConnectProvider() {
         → Broadcast → Execute with Oracle → Broadcast Execution
       </p>
 
+      <div style={{ marginBottom: '1rem' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={singleFundedMode}
+            onChange={(e) => setSingleFundedMode(e.target.checked)}
+          />
+          <span>
+            <strong>Single-funded mode</strong> (lender has no inputs - for Fordefi testing)
+          </span>
+        </label>
+        <div
+          style={{ fontSize: '0.85em', color: '#888', marginTop: '0.25rem', marginLeft: '1.5rem' }}
+        >
+          {singleFundedMode
+            ? 'Offerer contributes 0 sats. Only the accepter (borrower) provides collateral.'
+            : 'Offerer contributes 50,000 sats (50% of total collateral).'}
+        </div>
+      </div>
+
       <Button
         onClick={() => {
           refetch().catch(console.error);
@@ -657,6 +688,17 @@ export function TestSatsConnectProvider() {
                           </div>
                           <div>
                             <strong>Funding Inputs:</strong> {data.dlcOffer.fundingInputs.length}
+                            {data.dlcOffer.fundingInputs.length === 0 && (
+                              <span
+                                style={{
+                                  marginLeft: '0.5rem',
+                                  color: '#ff9800',
+                                  fontWeight: 'bold',
+                                }}
+                              >
+                                (single-funded)
+                              </span>
+                            )}
                           </div>
                           <div>
                             <strong>Funding Pubkey:</strong>{' '}
