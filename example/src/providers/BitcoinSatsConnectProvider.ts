@@ -676,6 +676,7 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const dlcAccept = new DlcAccept();
       dlcAccept.temporaryContractId = dlcOffer.temporaryContractId;
       dlcAccept.acceptCollateral = 0n;
+      dlcAccept.markAsSingleFunded();
       dlcAccept.fundingInputs = []; // No funding inputs for 0 collateral
       dlcAccept.fundingPubkey = Buffer.from(paymentAddress.publicKey, 'hex');
       dlcAccept.payoutSpk = Buffer.from(this.addressToScriptPubKey(paymentAddress.address), 'hex');

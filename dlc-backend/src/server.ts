@@ -2239,6 +2239,7 @@ app.post('/api/dlc/offerer-adaptor-points', async (req, res) => {
     const dlcAccept = new DlcAccept();
     dlcAccept.temporaryContractId = dlcOffer.temporaryContractId;
     dlcAccept.acceptCollateral = 0n;
+    dlcAccept.markAsSingleFunded();
     dlcAccept.fundingInputs = [];
     dlcAccept.fundingPubkey = Buffer.from(accepterPubkey, 'hex');
     dlcAccept.payoutSpk = addressToScriptPubKey(accepterAddress, network);
