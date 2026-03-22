@@ -2314,9 +2314,19 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.listen(port, () => {
+app.listen(port, async () => {
   console.log(`🚀 DLC Backend server running on http://localhost:${port}`);
   console.log(`📊 Health check: http://localhost:${port}/health`);
+
+  // Log server wallet address for funding
+  try {
+    const addresses = await bitcoinWithDdk.getMethod('getAddresses')(0, 1);
+    if (addresses && addresses.length > 0) {
+      console.log(`💰 Server wallet address (for funding): ${addresses[0].address}`);
+    }
+  } catch (e) {
+    console.error('Could not fetch server wallet address');
+  }
 });
 
 export default app;
