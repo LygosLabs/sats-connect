@@ -31,6 +31,7 @@
     "@stacks/transactions": "^7.0.2",
     "@tabler/icons-react": "3.34.1",
     "@tanstack/react-query": "^5.50.1",
+    "bech32": "^2.0.0",
     "bigi": "^1.4.2",
     "bip-schnorr": "^0.6.7",
     "bip322-js": "^2.0.0",

@@ -2,21 +2,44 @@ import BitcoinDdkProvider from '@atomicfinance/bitcoin-ddk-provider';
 import { Client } from '@atomicfinance/client';
 import { bitcoin, Input } from '@atomicfinance/types';
 import * as ddkJs from '@bennyblader/ddk-ts';
+import { StreamReader } from '@node-dlc/bufio';
+import { Sequence, Tx } from '@node-dlc/core';
 import {
   DlcAccept,
   DlcOffer,
   DlcSign,
+  FundingInput,
   SingleContractInfo,
   SingleOracleInfo,
 } from '@node-dlc/messaging';
+import * as bech32Module from 'bech32';
 import { generateMnemonic } from 'bip39';
 import { BitcoinNetworks } from 'bitcoin-network';
-import { address, Transaction as btcTransaction, payments, Psbt } from 'bitcoinjs-lib';
+import { address, Transaction as btcTransaction, payments, Psbt, script } from 'bitcoinjs-lib';
 import cors from 'cors';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 import express from 'express';
 import MinimalScanWalletProvider from './MinimalScanWalletProvider';
 import RateLimitedEsploraApiProvider from './RateLimitedEsploraApiProvider';
+
+// Helper function to convert any Bitcoin address to scriptPubKey (supports SegWit and Taproot)
+function addressToScriptPubKey(addressStr: string, networkObj: any): Buffer {
+  // Try standard bitcoinjs-lib first (works for P2PKH, P2SH, P2WPKH, P2WSH)
+  try {
+    return address.toOutputScript(addressStr, networkObj);
+  } catch (e) {
+    // Handle Taproot (bech32m) addresses
+    if (addressStr.startsWith('tb1p') || addressStr.startsWith('bc1p')) {
+      // Decode bech32m address
+      const decoded = bech32Module.bech32m.decode(addressStr);
+      const witnessProgram = bech32Module.bech32m.fromWords(decoded.words.slice(1));
+      // P2TR scriptPubKey: OP_1 (0x51) + push32 (0x20) + 32-byte x-only pubkey
+      return Buffer.concat([Buffer.from([0x51, 0x20]), Buffer.from(witnessProgram)]);
+    }
+    throw e;
+  }
+}
 // import BlockstreamApiProvider from './BlockstreamApiProvider';
 
 // Load environment variables
@@ -148,43 +171,11 @@ app.post('/api/dlc/accept', async (req, res) => {
       );
     });
 
-    console.log('🔍 Inputs created for DLC accept:', inputs.length);
-
-    console.log('dlcOffer', dlcOffer.toJSON());
-
-    // Debug: Check offer funding inputs segwit status
-    console.log('🔍 Offer funding inputs segwit check:');
-    dlcOffer.fundingInputs.forEach((input, index) => {
-      console.log(
-        `  Input ${index}: isSegWit=${input.prevTx.isSegWit}, witness lengths: ${input.prevTx.inputs.map((i) => i.witness?.length || 0).join(', ')}`
-      );
-      console.log(
-        `    prevTx hex prefix: ${input.prevTx.serialize().toString('hex').substring(0, 20)}...`
-      );
-    });
-
     // Use DDK client to accept the DLC offer with inputs
     let acceptDlcOfferResponse;
     try {
       acceptDlcOfferResponse = await bitcoinWithDdk.dlc.acceptDlcOffer(dlcOffer, inputs);
     } catch (acceptError: any) {
-      // Debug: If accept fails, log more details about the inputs
-      console.error('🔴 Accept DLC Offer failed:', acceptError.message);
-      console.log('🔍 Debug: Backend inputs being used:');
-      for (const input of inputs) {
-        console.log(`  UTXO: ${input.txid}:${input.vout}`);
-        // Fetch raw tx to check segwit status
-        try {
-          const rawTxResponse = await fetch(
-            `https://mempool.space/testnet4/api/tx/${input.txid}/hex`
-          );
-          const rawTxHex = await rawTxResponse.text();
-          console.log(`  Raw tx hex prefix: ${rawTxHex.substring(0, 30)}...`);
-          console.log(`  Has segwit marker (0001): ${rawTxHex.substring(8, 12) === '0001'}`);
-        } catch (fetchErr) {
-          console.log(`  Could not fetch raw tx: ${fetchErr}`);
-        }
-      }
       throw acceptError;
     }
     const dlcAccept = acceptDlcOfferResponse.dlcAccept;
@@ -215,7 +206,6 @@ app.post('/api/dlc/accept', async (req, res) => {
     //   (dlcOffer.contractInfo as SingleContractInfo).oracleInfo as SingleOracleInfo
     // );
     const { messagesList } = await bitcoinWithDdk.getMethod('createDlcTxs')(dlcOffer, dlcAccept);
-    console.log('messagesList', messagesList);
 
     const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(messagesList);
 
@@ -225,70 +215,6 @@ app.post('/api/dlc/accept', async (req, res) => {
     // So map over msgsForDdk[0][0] (the array of all outcome hashes)
     const transformedMsgsForDdk = msgsForDdk[0][0].map((message: Buffer) => [[message]]);
 
-    console.log('\n🔍 Oracle & Message Debug Info:');
-    console.log('Oracle public key:', oraclePublicKey.toString('hex'));
-    console.log(
-      'Oracle nonces:',
-      oracleNonces.map((n: Buffer) => n.toString('hex'))
-    );
-    console.log('Number of messages (outcomes):', transformedMsgsForDdk.length);
-    // console.log(
-    //   'Raw enumMessages structure:',
-    //   JSON.stringify(
-    //     enumMessages.map((m: any) =>
-    //       m.msgs ? m.msgs.map((msg: Buffer) => msg.toString('hex')) : m
-    //     )
-    //   )
-    // );
-    console.log(
-      'msgsForDdk structure depth:',
-      `[${msgsForDdk.length}][${msgsForDdk[0]?.length}][${msgsForDdk[0]?.[0]?.length}]`
-    );
-    console.log('msgsForDdk full structure analysis:');
-    console.log('  msgsForDdk[0] is array?', Array.isArray(msgsForDdk[0]));
-    console.log('  msgsForDdk[0] length:', msgsForDdk[0]?.length);
-    console.log('  msgsForDdk[0][0] is array?', Array.isArray(msgsForDdk[0]?.[0]));
-    console.log('  msgsForDdk[0][0] length:', msgsForDdk[0]?.[0]?.length);
-
-    console.log('All outcome hashes (msgsForDdk[0][0]):');
-    if (Array.isArray(msgsForDdk[0]?.[0])) {
-      msgsForDdk[0][0].forEach((msg: Buffer, idx: number) => {
-        console.log(`  Outcome ${idx}:`, msg.toString('hex'));
-      });
-    } else {
-      console.log('  ERROR: Not an array!', msgsForDdk[0]?.[0]);
-    }
-
-    // Log each message for adaptor point calculation
-    console.log('transformedMsgsForDdk (wrapped for DDK):');
-    console.log('  Length:', transformedMsgsForDdk.length);
-    console.log('  Structure per CET:');
-    transformedMsgsForDdk.forEach((msgWrapper: Buffer[][], index: number) => {
-      console.log(`    CET ${index}:`, {
-        isArray: Array.isArray(msgWrapper),
-        length: msgWrapper?.length,
-        firstElementIsArray: Array.isArray(msgWrapper?.[0]),
-        firstElementLength: msgWrapper?.[0]?.length,
-        messageHash: msgWrapper?.[0]?.[0]?.toString('hex'),
-      });
-    });
-
-    console.log('\n🔍 Calling createCetAdaptorPointsFromOracleInfo with:');
-    console.log('  Oracle count:', 1);
-    console.log(
-      '  Messages structure:',
-      JSON.stringify({
-        type: 'Buffer[][][]',
-        outerLength: transformedMsgsForDdk.length,
-        sampleStructure: transformedMsgsForDdk[0]
-          ? {
-              middleLength: transformedMsgsForDdk[0].length,
-              innerLength: transformedMsgsForDdk[0][0]?.length,
-            }
-          : null,
-      })
-    );
-
     const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
       [
         {
@@ -297,16 +223,7 @@ app.post('/api/dlc/accept', async (req, res) => {
         },
       ],
       msgsForDdk
-      // transformedMsgsForDdk
     );
-
-    console.log('\n🔑 Adaptor Points (sent to Fordefi):');
-    console.log('Number of adaptor points:', adaptorPoints.length);
-    adaptorPoints.forEach((point: Buffer, index: number) => {
-      console.log(
-        `  Point ${index}: ${point.toString('hex')} (base64: ${point.toString('base64')})`
-      );
-    });
 
     // Debug: Get adaptor signature inputs using the new debug function
     // This lets us compare values with Fordefi to debug signature mismatches
@@ -1873,12 +1790,6 @@ app.post('/api/dlc/execute-with-fordefi', async (req, res) => {
     // Parse the CET transaction using bitcoinjs-lib
     const cetTx = btcTransaction.fromBuffer(cetRawBytes);
 
-    console.log('🔍 CET transaction:');
-    console.log('  Version:', cetTx.version);
-    console.log('  Locktime:', cetTx.locktime);
-    console.log('  Inputs:', cetTx.ins.length);
-    console.log('  Outputs:', cetTx.outs.length);
-
     // Create PSBT from the CET
     const psbt = new Psbt({ network });
 
@@ -1905,8 +1816,6 @@ app.post('/api/dlc/execute-with-fordefi', async (req, res) => {
     // Set locktime
     psbt.setLocktime(cetTx.locktime);
 
-    console.log('🔍 PSBT created with input and outputs');
-
     // Add both partial signatures
     // Fordefi's signature corresponds to offerPubkey
     // Server's decrypted signature corresponds to acceptPubkey
@@ -1923,12 +1832,6 @@ app.post('/api/dlc/execute-with-fordefi', async (req, res) => {
       },
     ];
 
-    console.log('🔍 Adding partial signatures:');
-    partialSigs.forEach((ps, i) => {
-      console.log(`  [${i}] pubkey: ${ps.pubkey.toString('hex')}`);
-      console.log(`  [${i}] signature: ${ps.signature.toString('hex')}`);
-    });
-
     psbt.updateInput(0, { partialSig: partialSigs });
 
     // Finalize the input
@@ -1940,29 +1843,465 @@ app.post('/api/dlc/execute-with-fordefi', async (req, res) => {
     const finalTxHex = finalTx.toHex();
     const txId = finalTx.getId();
 
-    console.log('✅ Final CET assembled using PSBT:');
-    console.log('  TX ID:', txId);
-    console.log('  TX Hex:', finalTxHex);
-
     res.json({
       txId,
       txHex: finalTxHex,
       success: true,
       message: 'CET assembled with Fordefi signature and server decrypted adaptor sig',
-      debugInfo: {
-        outcomeIndex,
-        serverAdaptorSigHex: fullAdaptorSig.toString('hex'),
-        serverDecryptedSigHex: Buffer.from(serverDecryptedSig).toString('hex'),
-        fordefiSigHex: fordefiSigBuffer.toString('hex'),
-        offerPubkeyFirst: offerFirst,
-        witnessScriptHex: paymentVariant.redeem?.output?.toString('hex') || '',
-      },
     });
   } catch (error: any) {
-    console.error('❌ Execute with Fordefi failed:', error);
-    console.error('Stack:', error.stack);
+    console.error('Execute with Fordefi failed:', error.message);
     res.status(500).json({
       error: 'Failed to execute DLC with Fordefi',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Create DLC offer as server (server is offerer with 100% collateral)
+ * For reversed flow where Fordefi/client is accepter with 0 collateral
+ * POST /api/dlc/create-offer
+ * Body: { totalCollateral: number, contractInfoHex: string }
+ * Returns: { dlcOfferHex: string, temporaryContractId: string, adaptorPoints: string[], dlcTransactionsHex: string }
+ */
+app.post('/api/dlc/create-offer', async (req, res) => {
+  try {
+    const { totalCollateral, contractInfoHex } = req.body;
+
+    if (!totalCollateral || !contractInfoHex) {
+      return res.status(400).json({ error: 'totalCollateral and contractInfoHex are required' });
+    }
+
+    // Deserialize contract info
+    const contractInfo = SingleContractInfo.deserialize(Buffer.from(contractInfoHex, 'hex'));
+    contractInfo.totalCollateral = BigInt(totalCollateral);
+
+    // Get first address for server wallet
+    const addresses = await bitcoinWithDdk.getMethod('getAddresses')(0, 1);
+    if (!addresses || addresses.length === 0) {
+      return res.status(500).json({ error: 'No wallet addresses available' });
+    }
+
+    const firstAddress = addresses[0];
+
+    // Get UTXOs for funding
+    const unspentTransactions = await bitcoinWithDdk.getMethod('getUnspentTransactions')([
+      firstAddress.address,
+    ]);
+
+    const offerCollateral = BigInt(totalCollateral);
+
+    // Check if we have enough balance
+    const totalUtxoValue = unspentTransactions.reduce(
+      (sum: number, utxo: any) => sum + utxo.value,
+      0
+    );
+    if (totalUtxoValue < Number(offerCollateral) + 10000) {
+      // Add buffer for fees
+      return res.status(400).json({
+        error: 'Insufficient balance',
+        details: `Server wallet has ${totalUtxoValue} sats, need ${Number(offerCollateral) + 10000} sats (including fees). Please fund address: ${firstAddress.address}`,
+      });
+    }
+
+    // Get keypair for funding pubkey
+    const keyPair = await bitcoinWithDdk.getMethod('keyPair')(firstAddress.derivationPath);
+    const fundingPubkey = Buffer.from(keyPair.publicKey);
+
+    // Manually build the DLC Offer (avoiding broken DDK createDlcOffer)
+    const dlcOffer = new DlcOffer();
+
+    // Generate random temporary contract ID
+    dlcOffer.temporaryContractId = crypto.randomBytes(32);
+    dlcOffer.contractInfo = contractInfo;
+    dlcOffer.fundingPubkey = fundingPubkey;
+    dlcOffer.payoutSpk = address.toOutputScript(firstAddress.address, network);
+    dlcOffer.payoutSerialId = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+    dlcOffer.offerCollateral = offerCollateral;
+
+    // Create funding inputs from UTXOs
+    // Fetch full transaction hex for each UTXO
+    const fundingInputs: FundingInput[] = [];
+    for (let i = 0; i < unspentTransactions.length; i++) {
+      const utxo = unspentTransactions[i];
+
+      // Fetch full tx hex
+      const txHexResponse = await fetch(`https://mempool.space/testnet4/api/tx/${utxo.txid}/hex`);
+      if (!txHexResponse.ok) {
+        throw new Error(`Failed to fetch tx hex for ${utxo.txid}`);
+      }
+      const txHex = await txHexResponse.text();
+
+      const tx = Tx.decode(StreamReader.fromHex(txHex));
+      const fundingInput = new FundingInput();
+      fundingInput.inputSerialId = BigInt(i + 1);
+      fundingInput.prevTx = tx;
+      fundingInput.prevTxVout = utxo.vout;
+      fundingInput.sequence = Sequence.default();
+      fundingInput.maxWitnessLen = 108; // Standard witness length for P2WPKH
+      fundingInput.redeemScript = Buffer.from('', 'hex');
+      fundingInputs.push(fundingInput);
+    }
+
+    dlcOffer.fundingInputs = fundingInputs;
+    dlcOffer.changeSpk = address.toOutputScript(firstAddress.address, network);
+    dlcOffer.changeSerialId = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+    dlcOffer.fundOutputSerialId = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+    dlcOffer.feeRatePerVb = 3n;
+    dlcOffer.cetLocktime = Math.floor(Date.now() / 1000) - 3600 * 15; // 15 hours ago
+    dlcOffer.refundLocktime = Math.floor(Date.now() / 1000) + 86400 * 7; // 7 days from now
+    dlcOffer.contractFlags = Buffer.from('00', 'hex');
+    dlcOffer.chainHash = Buffer.from(
+      '00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043',
+      'hex'
+    ); // Bitcoin testnet4
+
+    // Pre-calculate adaptor points for client
+    const oraclePublicKey = (contractInfo.oracleInfo as SingleOracleInfo).announcement
+      .oraclePublicKey;
+    const oracleNonces = (contractInfo.oracleInfo as SingleOracleInfo).announcement.getNonces();
+
+    res.json({
+      dlcOfferHex: dlcOffer.serialize().toString('hex'),
+      temporaryContractId: dlcOffer.temporaryContractId.toString('hex'),
+      oraclePublicKey: oraclePublicKey.toString('hex'),
+      oracleNonces: oracleNonces.map((n: Buffer) => n.toString('hex')),
+      success: true,
+    });
+  } catch (error: any) {
+    console.error('Error creating DLC offer:', error);
+    res.status(500).json({
+      error: 'Failed to create DLC offer',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Sign DLC accept (server signs as offerer)
+ * POST /api/dlc/sign-accept
+ * Body: { dlcOfferHex: string, dlcAcceptHex: string }
+ * Returns: { dlcSignHex: string, contractId: string, fundingTxHex: string }
+ */
+app.post('/api/dlc/sign-accept', async (req, res) => {
+  try {
+    const { dlcOfferHex, dlcAcceptHex } = req.body;
+
+    if (!dlcOfferHex || !dlcAcceptHex) {
+      return res.status(400).json({ error: 'dlcOfferHex and dlcAcceptHex are required' });
+    }
+
+    // Deserialize messages
+    const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
+    const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
+
+    // Sign as offerer - create DlcSign message
+    // signDlcAccept returns { dlcSign, dlcTransactions }
+    const signResponse = await bitcoinWithDdk.dlc.signDlcAccept(dlcOffer, dlcAccept);
+
+    const dlcSign = signResponse.dlcSign;
+    const dlcTransactions = signResponse.dlcTransactions;
+
+    const contractId = dlcTransactions.contractId;
+    const contractIdHex = contractId.toString('hex');
+
+    // Store the state
+    dlcStore.set(contractIdHex, {
+      offer: dlcOffer,
+      accept: dlcAccept,
+      sign: dlcSign,
+      transactions: dlcTransactions,
+    });
+
+    // Finalize and get funding transaction
+    const fundTx = await bitcoinWithDdk.dlc.finalizeDlcSign(
+      dlcOffer,
+      dlcAccept,
+      dlcSign,
+      dlcTransactions
+    );
+
+    res.json({
+      dlcSignHex: dlcSign.serialize().toString('hex'),
+      contractId: contractIdHex,
+      fundingTxId: fundTx.txId.serialize().toString('hex'),
+      fundingTxHex: fundTx.serialize().toString('hex'),
+      dlcTransactionsHex: dlcTransactions.serialize().toString('hex'),
+      success: true,
+    });
+  } catch (error: any) {
+    console.error('Error signing DLC accept:', error);
+    res.status(500).json({
+      error: 'Failed to sign DLC accept',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Execute DLC as offerer
+ * POST /api/dlc/execute-as-offerer
+ * Body: { contractId: string, oracleAttestationHex: string }
+ * Returns: { txId: string, txHex: string }
+ */
+app.post('/api/dlc/execute-as-offerer', async (req, res) => {
+  try {
+    const { contractId, oracleAttestationHex } = req.body;
+
+    if (!contractId || !oracleAttestationHex) {
+      return res.status(400).json({ error: 'contractId and oracleAttestationHex are required' });
+    }
+
+    // Get stored DLC state
+    const dlcState = dlcStore.get(contractId);
+    if (!dlcState?.offer || !dlcState?.accept || !dlcState?.transactions) {
+      return res.status(404).json({ error: 'DLC state not found for contract ID' });
+    }
+
+    // Deserialize the oracle attestation
+    const { OracleAttestation } = await import('@node-dlc/messaging');
+    const oracleAttestation = OracleAttestation.deserialize(
+      Buffer.from(oracleAttestationHex, 'hex')
+    );
+
+    // Find the matching CET based on outcome
+    const contractInfo = dlcState.offer.contractInfo as SingleContractInfo;
+    const contractDescriptor = contractInfo.contractDescriptor;
+    const attestedOutcome = oracleAttestation.outcomes[0];
+    const crypto = require('crypto');
+
+    // Hash the attested outcome for comparison
+    const attestedOutcomeHash = crypto.createHash('sha256').update(attestedOutcome).digest('hex');
+
+    // Find outcome index for enumerated contracts
+    let outcomeIndex = -1;
+    const isEnumerated =
+      contractDescriptor.type === 42768 || (contractDescriptor as any).contractDescriptorType === 0;
+
+    if (isEnumerated) {
+      const enumDescriptor = contractDescriptor as any;
+      outcomeIndex = enumDescriptor.outcomes.findIndex((o: any) => {
+        const outcomeText = typeof o === 'string' ? o : o.outcome;
+        if (outcomeText === attestedOutcome) return true;
+        const storedOutcomeHash = crypto.createHash('sha256').update(outcomeText).digest('hex');
+        if (storedOutcomeHash === attestedOutcomeHash) return true;
+        if (outcomeText === attestedOutcomeHash) return true;
+        return false;
+      });
+    }
+
+    if (outcomeIndex < 0) {
+      return res.status(400).json({ error: `Outcome "${attestedOutcome}" not found in contract` });
+    }
+
+    // Get the accepter's adaptor signature for this outcome (from dlcAccept)
+    const accepterAdaptorSig = dlcState.accept.cetAdaptorSignatures.sigs[outcomeIndex];
+
+    // Construct full adaptor signature
+    const fullAdaptorSig = Buffer.concat([
+      accepterAdaptorSig.encryptedSig,
+      accepterAdaptorSig.dleqProof || Buffer.alloc(0),
+    ]);
+
+    if (fullAdaptorSig.length !== 162) {
+      throw new Error(
+        `Unexpected adaptor signature length: ${fullAdaptorSig.length} (expected 162)`
+      );
+    }
+
+    // Get CET and prepare for signing
+    const cet = dlcState.transactions.cets[outcomeIndex];
+    const fundOutputValue = BigInt(
+      Math.round(dlcState.transactions.fundTx.outputs[dlcState.transactions.fundTxVout].value * 1e8)
+    );
+
+    // Get the offerer's private key
+    const offererFundingPubkeyHex = dlcState.offer.fundingPubkey.toString('hex');
+
+    let offererPrivKey: string | null = null;
+    const existingAddresses = await bitcoinWithDdk.getMethod('getAddresses')();
+    for (const addressInfo of existingAddresses) {
+      if (addressInfo.derivationPath) {
+        try {
+          const keyPair = await bitcoinWithDdk.getMethod('keyPair')(addressInfo.derivationPath);
+          const pubkeyHex = Buffer.from(keyPair.publicKey).toString('hex');
+          if (pubkeyHex === offererFundingPubkeyHex) {
+            offererPrivKey = Buffer.from(keyPair.privateKey).toString('hex');
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    // Search through more addresses if not found
+    if (!offererPrivKey) {
+      for (const isChange of [false, true]) {
+        for (let i = 0; i < 100; i++) {
+          try {
+            const addresses = await bitcoinWithDdk.getMethod('getAddresses')(i, 1, isChange);
+            if (addresses && addresses.length > 0) {
+              const addressInfo = addresses[0];
+              if (addressInfo.derivationPath) {
+                const keyPair = await bitcoinWithDdk.getMethod('keyPair')(
+                  addressInfo.derivationPath
+                );
+                const pubkeyHex = Buffer.from(keyPair.publicKey).toString('hex');
+                if (pubkeyHex === offererFundingPubkeyHex) {
+                  offererPrivKey = Buffer.from(keyPair.privateKey).toString('hex');
+                  break;
+                }
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+        if (offererPrivKey) break;
+      }
+    }
+
+    if (!offererPrivKey) {
+      throw new Error(`Could not find private key for funding pubkey: ${offererFundingPubkeyHex}`);
+    }
+
+    // Prepare CET for DDK
+    const cetForDdk = {
+      version: cet.version,
+      lockTime: cet.locktime.value,
+      inputs: cet.inputs.map((input: any) => ({
+        txid: input.outpoint.txid.serialize().toString('hex'),
+        vout: input.outpoint.outputIndex,
+        scriptSig: input.scriptSig?.serialize() || Buffer.alloc(0),
+        sequence: input.sequence?.value || 0xffffffff,
+        witness: input.witness || [],
+      })),
+      outputs: cet.outputs.map((output: any) => ({
+        value: BigInt(Math.round(output.value * 1e8)),
+        scriptPubkey: output.scriptPubKey.serialize(),
+      })),
+      rawBytes: cet.serialize(),
+    };
+
+    // Sign the CET
+    // As offerer, we decrypt the ACCEPTER's adaptor sig using oracle attestation
+    // Parameters: (cet, adaptorSig, oracleSigs, ourPrivKey, otherPubkey, ourPubkey, fundValue)
+    const signedCet = ddkJs.signCet(
+      cetForDdk,
+      fullAdaptorSig,
+      oracleAttestation.signatures,
+      Buffer.from(offererPrivKey, 'hex'),
+      dlcState.accept.fundingPubkey, // Other pubkey (accepter who made adaptor sig)
+      dlcState.offer.fundingPubkey, // Our pubkey (offerer)
+      fundOutputValue
+    );
+
+    const txHex = signedCet.rawBytes.toString('hex');
+    const signedCetBtc = btcTransaction.fromBuffer(signedCet.rawBytes);
+    const txId = signedCetBtc.getId();
+
+    res.json({
+      txId,
+      txHex,
+      success: true,
+      message: 'CET signed as offerer',
+    });
+  } catch (error: any) {
+    console.error('Execute as offerer failed:', error.message);
+    res.status(500).json({
+      error: 'Failed to execute DLC as offerer',
+      details: error.message,
+    });
+  }
+});
+
+/**
+ * Get adaptor points for server-as-offerer flow
+ * POST /api/dlc/offerer-adaptor-points
+ * Body: { dlcOfferHex: string, accepterPubkey: string, accepterAddress: string }
+ * Returns: { adaptorPoints: string[], dlcTransactionsHex: string }
+ */
+app.post('/api/dlc/offerer-adaptor-points', async (req, res) => {
+  try {
+    const { dlcOfferHex, accepterPubkey, accepterAddress } = req.body;
+
+    if (!dlcOfferHex || !accepterPubkey || !accepterAddress) {
+      return res
+        .status(400)
+        .json({ error: 'dlcOfferHex, accepterPubkey, and accepterAddress are required' });
+    }
+
+    const dlcOffer = DlcOffer.deserialize(Buffer.from(dlcOfferHex, 'hex'));
+
+    // Create placeholder DlcAccept with accepter's pubkey and address
+    const dlcAccept = new DlcAccept();
+    dlcAccept.temporaryContractId = dlcOffer.temporaryContractId;
+    dlcAccept.acceptCollateral = 0n;
+    dlcAccept.fundingInputs = [];
+    dlcAccept.fundingPubkey = Buffer.from(accepterPubkey, 'hex');
+    dlcAccept.payoutSpk = addressToScriptPubKey(accepterAddress, network);
+    dlcAccept.payoutSerialId = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+    dlcAccept.changeSpk = addressToScriptPubKey(accepterAddress, network);
+    dlcAccept.changeSerialId = BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+
+    // Create DLC transactions
+    const { dlcTransactions, messagesList } = await bitcoinWithDdk.getMethod('createDlcTxs')(
+      dlcOffer,
+      dlcAccept
+    );
+
+    // Get oracle info
+    const contractInfo = dlcOffer.contractInfo as SingleContractInfo;
+    const oracleInfo = contractInfo.oracleInfo as SingleOracleInfo;
+    const oraclePublicKey = oracleInfo.announcement.oraclePublicKey;
+    const oracleNonces = oracleInfo.announcement.getNonces();
+
+    // Calculate adaptor points
+    const msgsForDdk = await bitcoinWithDdk.getMethod('convertMessagesForDdk')(messagesList);
+    const adaptorPoints = ddkJs.createCetAdaptorPointsFromOracleInfo(
+      [{ publicKey: oraclePublicKey, nonces: oracleNonces }],
+      msgsForDdk
+    );
+
+    // Compute contract ID from funding tx if not already set
+    // Contract ID = funding_txid XOR funding_output_index (as 32-byte buffer)
+    let contractId: Buffer;
+    if (dlcTransactions.contractId) {
+      contractId = dlcTransactions.contractId;
+    } else {
+      const fundTxId = dlcTransactions.fundTx.txId.serialize();
+      const fundTxVout = dlcTransactions.fundTxVout;
+      contractId = Buffer.alloc(32);
+      fundTxId.copy(contractId);
+      // XOR the last 4 bytes with the output index
+      const voutBuffer = Buffer.alloc(4);
+      voutBuffer.writeUInt32LE(fundTxVout);
+      for (let i = 0; i < 4; i++) {
+        contractId[contractId.length - 4 + i] ^= voutBuffer[i];
+      }
+    }
+
+    // Instead of serializing DlcTransactions (which has incompatible format between DDK and node-dlc),
+    // send the raw transaction data that the frontend needs to build PSBTs
+    const fundTxHex = dlcTransactions.fundTx.serialize().toString('hex');
+    const refundTxHex = dlcTransactions.refundTx.serialize().toString('hex');
+    const cetHexes = dlcTransactions.cets.map((cet: any) => cet.serialize().toString('hex'));
+
+    res.json({
+      adaptorPoints: adaptorPoints.map((point: Buffer) => point.toString('base64')),
+      fundTxHex,
+      refundTxHex,
+      cetHexes,
+      fundTxVout: dlcTransactions.fundTxVout,
+      contractId: contractId.toString('hex'),
+      success: true,
+    });
+  } catch (error: any) {
+    console.error('Error calculating offerer adaptor points:', error.message);
+    res.status(500).json({
+      error: 'Failed to calculate adaptor points',
       details: error.message,
     });
   }

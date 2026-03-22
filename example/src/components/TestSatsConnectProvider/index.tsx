@@ -44,6 +44,9 @@ export function TestSatsConnectProvider() {
 
   const [provider] = useState(() => new BitcoinSatsConnectProvider());
 
+  // Flow mode: 'client-offerer' = Fordefi creates offer, 'server-offerer' = Server creates offer
+  const [flowMode, setFlowMode] = useState<'client-offerer' | 'server-offerer'>('client-offerer');
+
   // Single-funded mode: offerer (lender) has zero inputs, only accepter (borrower) provides collateral
   const [singleFundedMode, setSingleFundedMode] = useState(false);
 
@@ -118,87 +121,210 @@ export function TestSatsConnectProvider() {
         console.log('  Total collateral:', contractInfo.totalCollateral.toString(), 'sats');
         console.log('  Serialized:', contractInfo.serialize().toString('hex'));
 
-        // Step 1: Create DLC offer using SatsConnect provider
-        // In single-funded mode, offerer contributes 0 sats (lender scenario)
-        // In dual-funded mode, offerer contributes 50% of total collateral
-        const offerCollateral = singleFundedMode ? 0n : 50000n;
-        console.log(
-          `🔍 Creating DLC offer with ${singleFundedMode ? 'SINGLE-FUNDED' : 'DUAL-FUNDED'} mode`,
-        );
-        console.log(`   Offer collateral: ${offerCollateral.toString()} sats`);
+        if (flowMode === 'server-offerer') {
+          // ========== SERVER AS OFFERER FLOW ==========
+          // Server creates offer with 100% collateral, Fordefi accepts with 0 collateral
+          console.log('🔍 Using SERVER-OFFERER flow (Fordefi is accepter with 0 collateral)');
 
-        dlcOffer = await provider.createDlcOffer(
-          contractInfo,
-          offerCollateral,
-          3n, // 3 sats/vB fee rate
-          Math.floor(Date.now() / 1000) - 3600 * 15, // CET locktime: 15 hours ago
-          Math.floor(Date.now() / 1000) + 86400, // Refund locktime: 24 hours from now
-        );
+          // Step 1: Fetch DLC offer from server
+          const createOfferResponse = await fetch('http://localhost:3005/api/dlc/create-offer', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              totalCollateral: Number(contractInfo.totalCollateral),
+              contractInfoHex: contractInfo.serialize().toString('hex'),
+            }),
+          });
 
-        console.log('DLC offer:', dlcOffer);
+          if (!createOfferResponse.ok) {
+            const errorData = (await createOfferResponse.json()) as { error: string };
+            throw new Error(`Create offer error: ${errorData.error}`);
+          }
 
-        // Step 2: Send DLC offer to backend for acceptance using DDK
-        const backendResponse = await fetch('http://localhost:3005/api/dlc/accept', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            dlcOfferHex: dlcOffer.serialize().toString('hex'),
-          }),
-        });
+          const offerData = (await createOfferResponse.json()) as {
+            dlcOfferHex: string;
+            temporaryContractId: string;
+            success: boolean;
+          };
 
-        if (!backendResponse.ok) {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-          const errorData = await backendResponse.json();
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          throw new Error(`Backend error: ${errorData.error}`);
-        }
+          dlcOffer = DlcOffer.deserialize(Buffer.from(offerData.dlcOfferHex, 'hex'));
+          console.log('  Server offer received');
+          console.log('  Temporary Contract ID:', offerData.temporaryContractId);
+          console.log('  Offer collateral:', dlcOffer.offerCollateral.toString(), 'sats');
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-        const acceptResponse = await backendResponse.json();
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-        dlcAcceptHex = acceptResponse.dlcAcceptHex;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-        dlcTransactionsHex = acceptResponse.dlcTransactionsHex;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-        adaptorPoints = acceptResponse.adaptorPoints;
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-        contractId = acceptResponse.contractId;
-
-        console.log('contractId', contractId);
-
-        if (dlcAcceptHex && dlcTransactionsHex && adaptorPoints) {
-          const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
-          const dlcTransactions = DlcTransactions.deserialize(
-            Buffer.from(dlcTransactionsHex, 'hex'),
+          // Step 2: Get adaptor points and transactions from server
+          // Server will create a placeholder accept internally using the client's pubkey
+          const paymentAddress = await provider.getPaymentAddress();
+          const adaptorPointsResponse = await fetch(
+            'http://localhost:3005/api/dlc/offerer-adaptor-points',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                dlcOfferHex: offerData.dlcOfferHex,
+                accepterPubkey: paymentAddress.publicKey,
+                accepterAddress: paymentAddress.address,
+              }),
+            },
           );
 
-          dlcSign = await provider.signDlcAccept(
-            dlcOffer,
-            dlcAccept,
-            dlcTransactions,
-            adaptorPoints,
-            contractId ?? undefined,
-          );
-        }
+          if (!adaptorPointsResponse.ok) {
+            const errorData = (await adaptorPointsResponse.json()) as { error: string };
+            throw new Error(`Adaptor points error: ${errorData.error}`);
+          }
 
-        // Output DLC messages as JSON for inspection
-        if (dlcOffer && dlcSign && dlcAcceptHex) {
-          console.log('=== DLC MESSAGES JSON OUTPUT ===');
-          console.log('DLC Offer JSON:', JSON.stringify(dlcOffer.toJSON(), null, 2));
-          console.log('DLC Offer Hex:', dlcOffer.serialize().toString('hex'));
+          const adaptorData = (await adaptorPointsResponse.json()) as {
+            adaptorPoints: string[];
+            fundTxHex: string;
+            refundTxHex: string;
+            cetHexes: string[];
+            fundTxVout: number;
+            contractId: string;
+            success: boolean;
+          };
 
-          const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
-          console.log('DLC Accept JSON:', JSON.stringify(dlcAccept.toJSON(), null, 2));
-          console.log('DLC Accept Hex:', dlcAccept.serialize().toString('hex'));
+          adaptorPoints = adaptorData.adaptorPoints;
+          contractId = adaptorData.contractId;
 
-          console.log('DLC Sign JSON:', JSON.stringify(dlcSign.toJSON(), null, 2));
-          console.log('DLC Sign Hex:', dlcSign.serialize().toString('hex'));
+          console.log('  Adaptor points received:', adaptorPoints?.length);
+          console.log('  Contract ID:', contractId);
+          console.log('  Fund TX hex length:', adaptorData.fundTxHex?.length);
+          console.log('  Refund TX hex length:', adaptorData.refundTxHex?.length);
+          console.log('  CET hexes count:', adaptorData.cetHexes?.length);
+
+          // Step 4: Accept the offer using Fordefi (creates accepter's adaptor sigs)
+          const dlcAccept = await provider.acceptDlcOfferWithRawTxs(dlcOffer, adaptorPoints ?? [], {
+            fundTxHex: adaptorData.fundTxHex,
+            refundTxHex: adaptorData.refundTxHex,
+            cetHexes: adaptorData.cetHexes,
+            fundTxVout: adaptorData.fundTxVout,
+          });
+
+          dlcAcceptHex = dlcAccept.serialize().toString('hex');
+          console.log('  DLC Accept created with Fordefi signatures');
+
+          // Step 5: Send accept to server for signing (server creates DlcSign)
+          const signAcceptResponse = await fetch('http://localhost:3005/api/dlc/sign-accept', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dlcOfferHex: offerData.dlcOfferHex,
+              dlcAcceptHex: dlcAcceptHex,
+            }),
+          });
+
+          if (!signAcceptResponse.ok) {
+            const errorData = (await signAcceptResponse.json()) as { error: string };
+            throw new Error(`Sign accept error: ${errorData.error}`);
+          }
+
+          const signData = (await signAcceptResponse.json()) as {
+            dlcSignHex: string;
+            contractId: string;
+            fundingTxId: string;
+            fundingTxHex: string;
+            dlcTransactionsHex: string;
+            success: boolean;
+          };
+
+          dlcSign = DlcSign.deserialize(Buffer.from(signData.dlcSignHex, 'hex'));
+          contractId = signData.contractId;
+          dlcTransactionsHex = signData.dlcTransactionsHex;
+
+          console.log('  DLC Sign received from server');
+          console.log('  Funding TX ID:', signData.fundingTxId);
+
+          // Output DLC messages
+          console.log('=== SERVER-OFFERER DLC MESSAGES ===');
+          console.log('DLC Offer Hex:', offerData.dlcOfferHex);
+          console.log('DLC Accept Hex:', dlcAcceptHex);
+          console.log('DLC Sign Hex:', signData.dlcSignHex);
+          console.log('Funding TX Hex:', signData.fundingTxHex);
           console.log('=== END DLC MESSAGES ===');
-        }
+        } else {
+          // ========== CLIENT AS OFFERER FLOW (original) ==========
+          // Step 1: Create DLC offer using SatsConnect provider
+          // In single-funded mode, offerer contributes 0 sats (lender scenario)
+          // In dual-funded mode, offerer contributes 50% of total collateral
+          const offerCollateral = singleFundedMode ? 0n : 50000n;
+          console.log(
+            `🔍 Creating DLC offer with ${singleFundedMode ? 'SINGLE-FUNDED' : 'DUAL-FUNDED'} mode`,
+          );
+          console.log(`   Offer collateral: ${offerCollateral.toString()} sats`);
 
-        console.log('dlcSign', dlcSign);
+          dlcOffer = await provider.createDlcOffer(
+            contractInfo,
+            offerCollateral,
+            3n, // 3 sats/vB fee rate
+            Math.floor(Date.now() / 1000) - 3600 * 15, // CET locktime: 15 hours ago
+            Math.floor(Date.now() / 1000) + 86400, // Refund locktime: 24 hours from now
+          );
+
+          console.log('DLC offer:', dlcOffer);
+
+          // Step 2: Send DLC offer to backend for acceptance using DDK
+          const backendResponse = await fetch('http://localhost:3005/api/dlc/accept', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              dlcOfferHex: dlcOffer.serialize().toString('hex'),
+            }),
+          });
+
+          if (!backendResponse.ok) {
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+            const errorData = await backendResponse.json();
+            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+            throw new Error(`Backend error: ${errorData.error}`);
+          }
+
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          const acceptResponse = await backendResponse.json();
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+          dlcAcceptHex = acceptResponse.dlcAcceptHex;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+          dlcTransactionsHex = acceptResponse.dlcTransactionsHex;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+          adaptorPoints = acceptResponse.adaptorPoints;
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
+          contractId = acceptResponse.contractId;
+
+          console.log('contractId', contractId);
+
+          if (dlcAcceptHex && dlcTransactionsHex && adaptorPoints) {
+            const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
+            const dlcTransactions = DlcTransactions.deserialize(
+              Buffer.from(dlcTransactionsHex, 'hex'),
+            );
+
+            dlcSign = await provider.signDlcAccept(
+              dlcOffer,
+              dlcAccept,
+              dlcTransactions,
+              adaptorPoints,
+              contractId ?? undefined,
+            );
+          }
+
+          // Output DLC messages as JSON for inspection
+          if (dlcOffer && dlcSign && dlcAcceptHex) {
+            console.log('=== DLC MESSAGES JSON OUTPUT ===');
+            console.log('DLC Offer JSON:', JSON.stringify(dlcOffer.toJSON(), null, 2));
+            console.log('DLC Offer Hex:', dlcOffer.serialize().toString('hex'));
+
+            const dlcAccept = DlcAccept.deserialize(Buffer.from(dlcAcceptHex, 'hex'));
+            console.log('DLC Accept JSON:', JSON.stringify(dlcAccept.toJSON(), null, 2));
+            console.log('DLC Accept Hex:', dlcAccept.serialize().toString('hex'));
+
+            console.log('DLC Sign JSON:', JSON.stringify(dlcSign.toJSON(), null, 2));
+            console.log('DLC Sign Hex:', dlcSign.serialize().toString('hex'));
+            console.log('=== END DLC MESSAGES ===');
+          }
+
+          console.log('dlcSign', dlcSign);
+        }
       } catch (error: unknown) {
         dlcError = error instanceof Error ? error.message : 'Unknown error';
       }
@@ -492,25 +618,84 @@ export function TestSatsConnectProvider() {
         → Broadcast → Execute with Oracle → Broadcast Execution
       </p>
 
-      <div style={{ marginBottom: '1rem' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={singleFundedMode}
-            onChange={(e) => setSingleFundedMode(e.target.checked)}
-          />
-          <span>
-            <strong>Single-funded mode</strong> (lender has no inputs - for Fordefi testing)
-          </span>
-        </label>
-        <div
-          style={{ fontSize: '0.85em', color: '#888', marginTop: '0.25rem', marginLeft: '1.5rem' }}
-        >
-          {singleFundedMode
-            ? 'Offerer contributes 0 sats. Only the accepter (borrower) provides collateral.'
-            : 'Offerer contributes 50,000 sats (50% of total collateral).'}
+      {/* Flow Mode Toggle */}
+      <div
+        style={{
+          marginBottom: '1rem',
+          padding: '0.75rem',
+          backgroundColor: '#1a1a2e',
+          borderRadius: '8px',
+        }}
+      >
+        <strong style={{ display: 'block', marginBottom: '0.5rem' }}>DLC Flow Mode:</strong>
+        <div style={{ display: 'flex', gap: '1rem' }}>
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}
+          >
+            <input
+              type="radio"
+              name="flowMode"
+              checked={flowMode === 'client-offerer'}
+              onChange={() => setFlowMode('client-offerer')}
+            />
+            <span>
+              <strong>Client as Offerer</strong>
+              <div style={{ fontSize: '0.8em', color: '#888' }}>
+                Fordefi creates offer, Server accepts
+              </div>
+            </span>
+          </label>
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}
+          >
+            <input
+              type="radio"
+              name="flowMode"
+              checked={flowMode === 'server-offerer'}
+              onChange={() => setFlowMode('server-offerer')}
+            />
+            <span>
+              <strong>Server as Offerer</strong>
+              <span style={{ marginLeft: '0.5rem', color: '#4CAF50', fontWeight: 'bold' }}>
+                (Recommended)
+              </span>
+              <div style={{ fontSize: '0.8em', color: '#888' }}>
+                Server creates offer (100% collateral), Fordefi accepts (0 collateral)
+              </div>
+            </span>
+          </label>
         </div>
       </div>
+
+      {/* Single-funded mode toggle (only shown for client-offerer flow) */}
+      {flowMode === 'client-offerer' && (
+        <div style={{ marginBottom: '1rem' }}>
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}
+          >
+            <input
+              type="checkbox"
+              checked={singleFundedMode}
+              onChange={(e) => setSingleFundedMode(e.target.checked)}
+            />
+            <span>
+              <strong>Single-funded mode</strong> (lender has no inputs - for Fordefi testing)
+            </span>
+          </label>
+          <div
+            style={{
+              fontSize: '0.85em',
+              color: '#888',
+              marginTop: '0.25rem',
+              marginLeft: '1.5rem',
+            }}
+          >
+            {singleFundedMode
+              ? 'Offerer contributes 0 sats. Only the accepter (borrower) provides collateral.'
+              : 'Offerer contributes 50,000 sats (50% of total collateral).'}
+          </div>
+        </div>
+      )}
 
       <Button
         onClick={() => {

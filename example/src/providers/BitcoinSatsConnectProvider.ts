@@ -13,6 +13,7 @@ import {
   FundingSignatures,
   ScriptWitnessV0,
 } from '@node-dlc/messaging';
+import * as bech32Module from 'bech32';
 import { BitcoinNetwork, BitcoinNetworks } from 'bitcoin-network';
 import { Psbt, address, Transaction as btTransaction, payments } from 'bitcoinjs-lib';
 import Wallet, { AddressPurpose } from 'sats-connect';
@@ -84,7 +85,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const response = await this.wallet.request('getAddresses', {
         purposes: [AddressPurpose.Payment, AddressPurpose.Ordinals],
       });
-      console.log('response', response);
 
       if (response.status === 'error') {
         throw new Error(`SatsConnect error: ${response.error?.message || 'Unknown error'}`);
@@ -223,9 +223,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         fundingInput.prevTx = tx;
         fundingInput.prevTxVout = input.vout;
         fundingInput.sequence = Sequence.default();
-        console.log(
-          `Created funding input with sequence: ${fundingInput.sequence.toString()} (${Number(fundingInput.sequence.toString())})`,
-        );
         fundingInput.maxWitnessLen = 108; // Standard witness length for P2WPKH
         fundingInput.redeemScript = Buffer.from('', 'hex');
         return fundingInput;
@@ -270,12 +267,49 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
   }
 
   /**
-   * Helper function to convert address to script pubkey
-   * @param address - Bitcoin address
+   * Helper function to convert address to script pubkey (supports SegWit and Taproot)
+   * @param addressStr - Bitcoin address
    * @return {string} Script pubkey hex
    */
   private addressToScriptPubKey(addressStr: string): string {
-    return address.toOutputScript(addressStr, this.network).toString('hex');
+    // Try standard bitcoinjs-lib first (works for P2PKH, P2SH, P2WPKH, P2WSH)
+    try {
+      return address.toOutputScript(addressStr, this.network).toString('hex');
+    } catch {
+      // Handle Taproot (bech32m) addresses
+      if (addressStr.startsWith('tb1p') || addressStr.startsWith('bc1p')) {
+        const decoded = bech32Module.bech32m.decode(addressStr);
+        const witnessProgram = bech32Module.bech32m.fromWords(decoded.words.slice(1));
+        // P2TR scriptPubKey: OP_1 (0x51) + push32 (0x20) + 32-byte x-only pubkey
+        const scriptPubKey = Buffer.concat([
+          Buffer.from([0x51, 0x20]),
+          Buffer.from(witnessProgram),
+        ]);
+        return scriptPubKey.toString('hex');
+      }
+      throw new Error(`Unsupported address format: ${addressStr}`);
+    }
+  }
+
+  /**
+   * Helper function to convert script pubkey to address (supports SegWit and Taproot)
+   * @param scriptPubKey - Script pubkey buffer
+   * @return {string} Bitcoin address
+   */
+  private scriptPubKeyToAddress(scriptPubKey: Buffer): string {
+    // Try standard bitcoinjs-lib first
+    try {
+      return address.fromOutputScript(scriptPubKey, this.network);
+    } catch {
+      // Handle Taproot (P2TR) scripts: OP_1 (0x51) + push32 (0x20) + 32-byte x-only pubkey
+      if (scriptPubKey.length === 34 && scriptPubKey[0] === 0x51 && scriptPubKey[1] === 0x20) {
+        const witnessProgram = scriptPubKey.slice(2);
+        const words = [1, ...bech32Module.bech32m.toWords(witnessProgram)]; // witness version 1
+        const prefix = this.network === BitcoinNetworks.bitcoin ? 'bc' : 'tb';
+        return bech32Module.bech32m.encode(prefix, words);
+      }
+      throw new Error(`Unsupported script pubkey format: ${scriptPubKey.toString('hex')}`);
+    }
   }
 
   /**
@@ -422,65 +456,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
       // CET adaptor signatures will be created after signing
 
-      console.log('DLC Transactions available:', {
-        fundTx: dlcTransactions.fundTx ? 'available' : 'missing',
-        refundTx: dlcTransactions.refundTx ? 'available' : 'missing',
-        cets: dlcTransactions.cets ? dlcTransactions.cets.length : 0,
-      });
-
       // Create PSBTs for all transactions
       const fundingPsbt = this.createFundingPsbt(dlcOffer, dlcAccept, dlcTransactions);
       const refundPsbt = this.createRefundPsbt(dlcOffer, dlcAccept, dlcTransactions);
-
-      // Debug: Check PSBT fees by manually calculating input/output difference
-      console.log('🔍 PSBT Fee Debug:');
-
-      console.log('dlcTransactions.fundTx', dlcTransactions.fundTx.toHex());
-      console.log('dlcTransactions.refundTx', dlcTransactions.refundTx.toHex());
-      console.log(
-        'dlcTransactions.cets',
-        dlcTransactions.cets.map((cet) => cet.toHex()),
-      );
-
-      // Calculate funding PSBT fee manually
-      const fundingPsbtDeserialized = fundingPsbt;
-      let fundingInputTotal = 0;
-      let fundingOutputTotal = 0;
-
-      fundingPsbtDeserialized.data.inputs.forEach((input) => {
-        if (input.witnessUtxo) {
-          fundingInputTotal += input.witnessUtxo.value;
-        }
-      });
-
-      fundingPsbtDeserialized.txOutputs.forEach((output) => {
-        fundingOutputTotal += output.value;
-      });
-
-      const fundingFee = fundingInputTotal - fundingOutputTotal;
-      console.log(
-        `Funding PSBT fee: ${fundingFee} sats (inputs: ${fundingInputTotal}, outputs: ${fundingOutputTotal})`,
-      );
-
-      // Calculate refund PSBT fee manually
-      const refundPsbtDeserialized = refundPsbt;
-      let refundInputTotal = 0;
-      let refundOutputTotal = 0;
-
-      refundPsbtDeserialized.data.inputs.forEach((input) => {
-        if (input.witnessUtxo) {
-          refundInputTotal += input.witnessUtxo.value;
-        }
-      });
-
-      refundPsbtDeserialized.txOutputs.forEach((output) => {
-        refundOutputTotal += output.value;
-      });
-
-      const refundFee = refundInputTotal - refundOutputTotal;
-      console.log(
-        `Refund PSBT fee: ${refundFee} sats (inputs: ${refundInputTotal}, outputs: ${refundOutputTotal})`,
-      );
 
       // Create CET PSBTs
       const cetPsbts: Psbt[] = [];
@@ -488,26 +466,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       for (let i = 0; i < numCets; i++) {
         const cetPsbt = this.createCetPsbt(dlcOffer, dlcAccept, dlcTransactions, i);
         cetPsbts.push(cetPsbt);
-
-        // Calculate CET PSBT fee manually
-        const cetPsbtDeserialized = cetPsbt;
-        let cetInputTotal = 0;
-        let cetOutputTotal = 0;
-
-        cetPsbtDeserialized.data.inputs.forEach((input) => {
-          if (input.witnessUtxo) {
-            cetInputTotal += input.witnessUtxo.value;
-          }
-        });
-
-        cetPsbtDeserialized.txOutputs.forEach((output) => {
-          cetOutputTotal += output.value;
-        });
-
-        const cetFee = cetInputTotal - cetOutputTotal;
-        console.log(
-          `CET ${i} PSBT fee: ${cetFee} sats (inputs: ${cetInputTotal}, outputs: ${cetOutputTotal})`,
-        );
       }
 
       // Get our addresses to determine which inputs we can sign
@@ -536,58 +494,8 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         }
       });
 
-      console.log(
-        `🔍 Funding input mapping: Offerer has ${dlcOffer.fundingInputs.length} inputs at PSBT indexes: [${ourFundingInputIndexes.join(', ')}]`,
-      );
-      console.log(`🔍 All funding inputs sorted by serialId:`);
-      allFundingInputs.forEach((input, psbtIndex) => {
-        const isOfferer = offererInputSerialIds.has(input.inputSerialId.toString());
-        console.log(
-          `  PSBT index ${psbtIndex}: serialId=${input.inputSerialId}, ${isOfferer ? 'OFFERER' : 'ACCEPTER'}`,
-        );
-      });
-
-      // Always fetch adaptor points from backend for consistency
-      console.log('🔍 Fetching adaptor points from backend for validation...');
-      const backendAdaptorPoints = await this.getAdaptorPoints(dlcOffer, dlcAccept);
-
-      // If adaptor points were provided (from accept response), validate they match
-      if (adaptorPoints) {
-        console.log('🔍 Validating provided adaptor points against backend calculation...');
-        console.log(`  Provided count: ${adaptorPoints.length}`);
-        console.log(`  Backend count: ${backendAdaptorPoints.length}`);
-
-        if (adaptorPoints.length !== backendAdaptorPoints.length) {
-          console.warn(
-            `⚠️ WARNING: Adaptor point count mismatch! Provided: ${adaptorPoints.length}, Backend: ${backendAdaptorPoints.length}`,
-          );
-        }
-
-        // Compare each adaptor point
-        let allMatch = true;
-        for (let i = 0; i < Math.min(adaptorPoints.length, backendAdaptorPoints.length); i++) {
-          if (adaptorPoints[i] !== backendAdaptorPoints[i]) {
-            console.warn(`⚠️ WARNING: Adaptor point ${i} mismatch!`);
-            console.warn(`  Provided:  ${adaptorPoints[i]}`);
-            console.warn(`  Backend:   ${backendAdaptorPoints[i]}`);
-            allMatch = false;
-          }
-        }
-
-        if (allMatch && adaptorPoints.length === backendAdaptorPoints.length) {
-          console.log('✅ All adaptor points match backend calculation');
-        } else {
-          console.warn('⚠️ Using backend-calculated adaptor points for signing');
-        }
-      }
-
-      // Always use backend-calculated adaptor points to ensure consistency
-      const calculatedAdaptorPoints = backendAdaptorPoints;
-
-      console.log(`🔍 SIGN REQUEST - Funding inputs to sign:`);
-      console.log(`  Address: ${firstAddress}`);
-      console.log(`  Input indexes: [${ourFundingInputIndexes.join(', ')}]`);
-      console.log(`  Total offerer inputs: ${dlcOffer.fundingInputs.length}`);
+      // Fetch adaptor points from backend
+      const calculatedAdaptorPoints = await this.getAdaptorPoints(dlcOffer, dlcAccept);
 
       // Build params - for single-funded DLCs, include fundingTransaction but with empty signInputs
       // This tells Fordefi the PSBT structure without requiring any signatures from this vault
@@ -613,18 +521,12 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
         })),
       };
 
-      console.log('Params:', params);
-
-      console.log('params', JSON.stringify(params, null, 2));
-
       // Use the new dlc_signOffer method for unified signing
       // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
       const signResponse = (await (this.wallet.request as any)(
         'dlc_signOffer',
         params,
       )) as SatsConnectResponse<SignDlcResult>;
-
-      console.log('Sign response:', signResponse);
 
       if (signResponse.status === 'error') {
         throw new Error(
@@ -645,21 +547,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const fundingSignatures = new FundingSignatures();
 
       // Extract witness elements from the signed funding PSBT
-      console.log(`🔍 Extracting signatures from signed PSBT:`);
-      console.log(`  ourFundingInputIndexes: [${ourFundingInputIndexes.join(', ')}]`);
-      console.log(`  Signed PSBT input count: ${signedFundingPsbt.data.inputs.length}`);
-      signedFundingPsbt.data.inputs.forEach((input, idx) => {
-        console.log(
-          `  Input ${idx}: partialSig count=${input.partialSig?.length ?? 0}, finalScriptWitness=${input.finalScriptWitness ? 'present' : 'absent'}`,
-        );
-      });
-
       const witnessElements: ScriptWitnessV0[][] = [];
       for (const inputIndex of ourFundingInputIndexes) {
         const input = signedFundingPsbt.data.inputs[inputIndex];
-        console.log(
-          `  Checking input ${inputIndex}: partialSig=${!!input?.partialSig}, length=${input?.partialSig?.length ?? 0}`,
-        );
         if (input?.partialSig && input.partialSig.length > 0) {
           // Extract signature from partialSig array
           const partialSig = input.partialSig[0];
@@ -678,10 +568,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
           // Create witness element array for this input: [signature, publicKey]
           witnessElements.push([signatureWitness, publicKeyWitness]);
-
-          console.log(`Funding input ${inputIndex} witness elements:`);
-          console.log(`  Signature: ${signature.toString('hex')} (${signature.length} bytes)`);
-          console.log(`  Public Key: ${publicKey.toString('hex')} (${publicKey.length} bytes)`);
         }
       }
 
@@ -694,20 +580,9 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       const refundInput = signedRefundPsbt.data.inputs[0];
       if (refundInput?.partialSig && refundInput.partialSig.length > 0) {
         const partialSig = refundInput.partialSig[0];
-        console.log(`Refund PSBT Signature Debug:`);
-        console.log(`Signature length: ${partialSig.signature.length} bytes`);
-        console.log(`Signature hex: ${partialSig.signature.toString('hex')}`);
-
         // Convert DER signature to compact format (64 bytes)
         const compactSignature = this.ensureCompactSignature(partialSig.signature);
-        console.log(`Compact signature length: ${compactSignature.length} bytes`);
-        console.log(`Compact signature hex: ${compactSignature.toString('hex')}`);
-
         dlcSign.refundSignature = compactSignature;
-
-        // Verify the internal storage is 64 bytes
-        console.log(`✅ Internal refundSignature length: ${dlcSign.refundSignature.length} bytes`);
-        console.log(`✅ Internal refundSignature hex: ${dlcSign.refundSignature.toString('hex')}`);
       } else {
         // Fallback to placeholder if extraction fails
         dlcSign.refundSignature = Buffer.from(this.generateRandomHex(64), 'hex');
@@ -723,180 +598,418 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
 
         for (let i = 0; i < signResult.cetTransactions.length; i++) {
           const base64AdaptorSig = signResult.cetTransactions[i];
-          // Decode the base64 adaptor signature
           const adaptorSignature = Buffer.from(base64AdaptorSig, 'base64');
 
-          console.log(`CET ${i} Adaptor Signature Debug:`);
-          console.log(`Total length: ${adaptorSignature.length} bytes`);
-          console.log(`Full hex: ${adaptorSignature.toString('hex')}`);
-
-          // Fordefi returns 162-byte adaptor signatures in format:
-          //   [R(33)][Ra(33)][Sa(32)][B(32)][C(32)]
-          // secp256k1-zkp EcdsaAdaptorSignature format (used by ddk-ffi):
-          //   [Ra(33)][Sa(32)][R(33)][e(32)][s(32)] = 162 bytes
-          // Note: B=e and C=s in the DLEQ proof
-          //
-          // DDK internal storage: encryptedSig = full 162 bytes, dleqProof = empty
-          // This matches how BitcoinDdkProvider stores adaptor signatures
+          // Fordefi returns 161-byte adaptor signatures that need reordering to secp256k1-zkp format
           if (adaptorSignature.length === 161) {
-            const R = adaptorSignature.subarray(0, 33); // bytes 0-32: R (commitment point)
-            const Ra = adaptorSignature.subarray(33, 66); // bytes 33-65: Ra (adapted R)
-            const Sa = adaptorSignature.subarray(66, 98); // bytes 66-97: Sa (adapted s)
-            const B = adaptorSignature.subarray(98, 130); // bytes 98-129: B (DLEQ proof e)
-            const C = adaptorSignature.subarray(130, 162); // bytes 130-161: C (DLEQ proof s)
+            const R = adaptorSignature.subarray(0, 33);
+            const Ra = adaptorSignature.subarray(33, 66);
+            const Sa = adaptorSignature.subarray(66, 98);
+            const B = adaptorSignature.subarray(98, 130);
+            const C = adaptorSignature.subarray(130, 162);
 
             // Reorder to secp256k1-zkp format: Ra, Sa, R, B, C
-            const reorderedSig = Buffer.concat([Ra, Sa, R, B, C]); // 162 bytes
+            const reorderedSig = Buffer.concat([Ra, Sa, R, B, C]);
 
-            console.log(`Converted Fordefi adaptor sig to secp256k1-zkp format:`);
-            console.log(`  Original (Fordefi):  R, Ra, Sa, B, C`);
-            console.log(`  Reordered (ddk-ffi): Ra, Sa, R, B, C`);
-            console.log(`  Full 162-byte sig: ${reorderedSig.toString('hex')}`);
-
-            // DDK internal format: store full 162 bytes in encryptedSig, empty dleqProof
             cetSigs.push({
               encryptedSig: reorderedSig,
               dleqProof: Buffer.alloc(0),
             });
           } else {
-            console.warn(
-              `Unexpected adaptor signature length: ${adaptorSignature.length} (expected 162)`,
-            );
-            // Fallback: store as-is (may not work correctly)
             cetSigs.push({
               encryptedSig: adaptorSignature,
               dleqProof: Buffer.alloc(0),
             });
           }
-
-          console.log('---');
         }
-
-        console.log(`Extracted ${cetSigs.length} CET adaptor signatures`);
 
         // Try to set the sigs property - this may need adjustment based on actual structure
         // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
         (cetAdaptorSignatures as any).sigs = cetSigs;
-      } catch (error) {
-        console.warn('Failed to extract CET adaptor signatures, using empty structure:', error);
+      } catch {
         // Use empty structure if extraction fails
       }
 
       dlcSign.cetAdaptorSignatures = cetAdaptorSignatures;
 
-      console.log('🔍 Final DlcSign Debug:');
-      console.log('Contract ID:', dlcSign.contractId.toString('hex'));
-      console.log('Refund signature (64 bytes):', dlcSign.refundSignature.toString('hex'));
-      console.log('CET adaptor signatures count:', dlcSign.cetAdaptorSignatures.sigs.length);
-      console.log('Funding signatures count:', dlcSign.fundingSignatures.witnessElements.length);
-
-      // Debug funding signatures in detail
-      console.log('🔍 Provider Funding Signatures Debug:');
-      dlcSign.fundingSignatures.witnessElements.forEach((witnessElement, index) => {
-        console.log(`  Input ${index} (our input):`);
-        witnessElement.forEach((witness, witnessIndex) => {
-          console.log(
-            `    Witness ${witnessIndex}: ${witness.witness.toString('hex')} (${witness.witness.length} bytes)`,
-          );
-        });
-      });
-
-      // Debug input order from our perspective
-      console.log('🔍 Our funding inputs (offerer):');
-      dlcOffer.fundingInputs.forEach((input, index) => {
-        console.log(
-          `  Input ${index}: ${input.prevTx.txId.toString()}:${input.prevTxVout} (serialId: ${input.inputSerialId})`,
-        );
-      });
-
-      // Validate funding signatures against what we created
-      console.log('🔍 Funding Signature Validation:');
-      try {
-        // Recreate the funding PSBT to compare
-        const validationPsbt = this.createFundingPsbt(dlcOffer, dlcAccept, dlcTransactions);
-
-        // Check that our signatures match the expected inputs
-        const allInputs = [...dlcOffer.fundingInputs, ...dlcAccept.fundingInputs];
-        const sortedInputs = [...allInputs].sort((a, b) =>
-          Number(a.inputSerialId - b.inputSerialId),
-        );
-
-        console.log('🔍 PSBT vs DLC Transaction Input Comparison:');
-
-        // Validate witness element count matches offerer input count
-        const offererInputCount = dlcOffer.fundingInputs.filter((input) => !input.dlcInput).length;
-        const witnessElementCount = dlcSign.fundingSignatures.witnessElements.length;
-
-        console.log(`🔍 Signature Count Validation:`);
-        console.log(`  Offerer non-DLC inputs: ${offererInputCount}`);
-        console.log(`  Witness elements provided: ${witnessElementCount}`);
-        console.log(`  Count matches: ${offererInputCount === witnessElementCount}`);
-
-        if (offererInputCount !== witnessElementCount) {
-          console.warn('⚠️ WARNING: Witness element count mismatch!');
-        }
-
-        // Validate the actual signatures by testing them against the PSBT
-        console.log('🔍 Signature Verification Test:');
-        let witnessIndex = 0;
-
-        for (let inputIndex = 0; inputIndex < sortedInputs.length; inputIndex++) {
-          const dlcInput = sortedInputs[inputIndex];
-          const isOffererInput = dlcOffer.fundingInputs.some(
-            (offerInput) =>
-              offerInput.prevTx.txId.toString() === dlcInput.prevTx.txId.toString() &&
-              offerInput.prevTxVout === dlcInput.prevTxVout,
-          );
-
-          if (isOffererInput && witnessIndex < dlcSign.fundingSignatures.witnessElements.length) {
-            try {
-              const witnessElement = dlcSign.fundingSignatures.witnessElements[witnessIndex];
-              const signature = witnessElement[0].witness;
-              const publicKey = witnessElement[1].witness;
-
-              // Add the signature to the validation PSBT
-              validationPsbt.updateInput(inputIndex, {
-                partialSig: [{ pubkey: publicKey, signature: signature }],
-              });
-
-              // Try to validate this specific input signature
-              validationPsbt.validateSignaturesOfInput(inputIndex, (pubkey, msghash, sig) => {
-                // Use a simple verification - in a real implementation you'd use proper secp256k1
-                return sig.length > 0 && pubkey.length === 33; // Basic sanity check
-              });
-
-              console.log(`  ✅ Input ${inputIndex} signature validation passed`);
-              witnessIndex++;
-            } catch (sigValidationError) {
-              console.error(
-                `  ❌ Input ${inputIndex} signature validation failed:`,
-                sigValidationError,
-              );
-            }
-          } else if (isOffererInput) {
-            console.log(
-              `  ⚠️ Input ${inputIndex} is offerer input but no witness element available`,
-            );
-          } else {
-            console.log(`  ➖ Input ${inputIndex} is accepter input (no signature expected)`);
-          }
-        }
-      } catch (validationError) {
-        console.error('❌ Funding signature validation failed:', validationError);
-      }
-
-      console.log('dlcSign.validate');
       dlcSign.validate();
-      console.log('dlcSign.serialize');
-      console.log('dlcSign.serialize', dlcSign.serialize().toString('hex'));
-      console.log('dlcSign.toJSON');
-      console.log('dlcSign.toJSON', dlcSign.toJSON());
 
       return dlcSign;
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       throw new Error(`Failed to sign DLC accept: ${errorMessage}`);
     }
+  }
+
+  /**
+   * Accept a DLC offer as accepter with 0 collateral using raw transaction data.
+   * This method accepts raw transaction hexes instead of DlcTransactions serialization,
+   * avoiding compatibility issues between DDK and node-dlc serialization formats.
+   *
+   * @param dlcOffer - The DLC offer from server
+   * @param adaptorPoints - Adaptor points for CET signing
+   * @param rawTxData - Raw transaction data from server
+   * @return {Promise<DlcAccept>} The DLC accept message with accepter's signatures
+   */
+  async acceptDlcOfferWithRawTxs(
+    dlcOffer: DlcOffer,
+    adaptorPoints: string[],
+    rawTxData: {
+      fundTxHex: string;
+      refundTxHex: string;
+      cetHexes: string[];
+      fundTxVout: number;
+    },
+  ): Promise<DlcAccept> {
+    try {
+      // Validate input
+      dlcOffer.validate();
+
+      // Get payment address for the accepter
+      const paymentAddress = await this.getPaymentAddress();
+
+      if (!paymentAddress.publicKey) {
+        throw new Error('No public key available from wallet');
+      }
+
+      // Create DlcAccept with 0 collateral
+      const dlcAccept = new DlcAccept();
+      dlcAccept.temporaryContractId = dlcOffer.temporaryContractId;
+      dlcAccept.acceptCollateral = 0n;
+      dlcAccept.fundingInputs = []; // No funding inputs for 0 collateral
+      dlcAccept.fundingPubkey = Buffer.from(paymentAddress.publicKey, 'hex');
+      dlcAccept.payoutSpk = Buffer.from(this.addressToScriptPubKey(paymentAddress.address), 'hex');
+      dlcAccept.payoutSerialId = this.generateSerialId();
+      dlcAccept.changeSpk = Buffer.from(this.addressToScriptPubKey(paymentAddress.address), 'hex');
+      dlcAccept.changeSerialId = this.generateSerialId();
+
+      // Parse raw transactions
+      const fundTx = btTransaction.fromHex(rawTxData.fundTxHex);
+      const refundTx = btTransaction.fromHex(rawTxData.refundTxHex);
+      const cets = rawTxData.cetHexes.map((hex) => btTransaction.fromHex(hex));
+
+      // Create PSBTs for signing using raw transactions
+      // Even for 0 collateral, Fordefi needs the funding PSBT for context
+      const fundingPsbt = this.createFundingPsbtFromRawTx(
+        dlcOffer,
+        dlcAccept,
+        fundTx,
+        rawTxData.fundTxVout,
+      );
+
+      const refundPsbt = this.createRefundPsbtFromRawTx(
+        dlcOffer,
+        dlcAccept,
+        fundTx,
+        refundTx,
+        rawTxData.fundTxVout,
+      );
+
+      // Create CET PSBTs
+      const cetPsbts: Psbt[] = [];
+      for (let i = 0; i < cets.length; i++) {
+        const cetPsbt = this.createCetPsbtFromRawTx(
+          dlcOffer,
+          dlcAccept,
+          fundTx,
+          cets[i],
+          rawTxData.fundTxVout,
+        );
+        cetPsbts.push(cetPsbt);
+      }
+
+      // Call Fordefi to sign
+      // Pass funding PSBT for context but with empty signInputs (0 collateral = no inputs to sign)
+      const params = {
+        fundingTransaction: {
+          psbt: fundingPsbt.toBase64(),
+          signInputs: {}, // Empty - accepter has no inputs to sign in funding tx
+        },
+        refundTransaction: {
+          psbt: refundPsbt.toBase64(),
+          signInputs: {
+            [paymentAddress.address]: [0], // Sign the funding input in refund transaction
+          },
+        },
+        cetTransactions: cetPsbts.map((cetPsbt, index) => ({
+          psbt: cetPsbt.toBase64(),
+          adaptorPoint: adaptorPoints[Math.min(index, adaptorPoints.length - 1)],
+        })),
+      };
+
+      // Use the dlc_signOffer method
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment
+      const signResponse = (await (this.wallet.request as any)(
+        'dlc_signOffer',
+        params,
+      )) as SatsConnectResponse<SignDlcResult>;
+
+      if (signResponse.status === 'error') {
+        throw new Error(
+          `Failed to sign DLC transactions: ${signResponse.error?.message ?? 'Unknown error'}`,
+        );
+      }
+
+      if (!signResponse.result) {
+        throw new Error('No result in sign response');
+      }
+
+      const signResult = signResponse.result;
+
+      // Extract refund signature from signed PSBT
+      const signedRefundPsbt = Psbt.fromBase64(signResult.refundTransaction);
+      const refundInput = signedRefundPsbt.data.inputs[0];
+
+      if (refundInput?.partialSig && refundInput.partialSig.length > 0) {
+        const partialSig = refundInput.partialSig[0];
+        // Convert DER signature to compact format (64 bytes)
+        const compactSignature = this.ensureCompactSignature(partialSig.signature);
+        dlcAccept.refundSignature = compactSignature;
+      } else {
+        throw new Error('No refund signature in response');
+      }
+
+      // Extract CET adaptor signatures
+      const cetAdaptorSignatures = new CetAdaptorSignatures();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cetSigs: any[] = [];
+
+      for (let i = 0; i < signResult.cetTransactions.length; i++) {
+        const base64AdaptorSig = signResult.cetTransactions[i];
+        const adaptorSignature = Buffer.from(base64AdaptorSig, 'base64');
+
+        // Fordefi returns 161-byte adaptor signatures that need reordering
+        if (adaptorSignature.length === 161) {
+          const R = adaptorSignature.subarray(0, 33);
+          const Ra = adaptorSignature.subarray(33, 66);
+          const Sa = adaptorSignature.subarray(66, 98);
+          const B = adaptorSignature.subarray(98, 130);
+          const C = adaptorSignature.subarray(130, 161);
+
+          // Pad C to 32 bytes if needed
+          const paddedC = C.length < 32 ? Buffer.concat([Buffer.alloc(32 - C.length), C]) : C;
+
+          // Reorder to secp256k1-zkp format
+          const reorderedSig = Buffer.concat([Ra, Sa, R, B, paddedC]);
+
+          cetSigs.push({
+            encryptedSig: reorderedSig,
+            dleqProof: Buffer.alloc(0),
+          });
+        } else if (adaptorSignature.length === 162) {
+          cetSigs.push({
+            encryptedSig: adaptorSignature,
+            dleqProof: Buffer.alloc(0),
+          });
+        } else {
+          console.warn(`Unexpected adaptor signature length: ${adaptorSignature.length}`);
+          cetSigs.push({
+            encryptedSig: adaptorSignature,
+            dleqProof: Buffer.alloc(0),
+          });
+        }
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
+      (cetAdaptorSignatures as any).sigs = cetSigs;
+      dlcAccept.cetAdaptorSignatures = cetAdaptorSignatures;
+
+      // Validate the accept message
+      dlcAccept.validate();
+
+      return dlcAccept;
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Failed to accept DLC offer: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Create funding PSBT from raw transaction data
+   * Used to provide context to Fordefi even when accepter has 0 collateral
+   */
+  private createFundingPsbtFromRawTx(
+    dlcOffer: DlcOffer,
+    _dlcAccept: DlcAccept,
+    fundTx: btTransaction,
+    _fundTxVout: number,
+  ): Psbt {
+    const fundingPsbt = new Psbt({ network: this.network });
+
+    // Add all inputs from the funding transaction
+    // For offerer-funded DLC, all inputs come from the offerer
+    for (let i = 0; i < fundTx.ins.length; i++) {
+      const input = fundTx.ins[i];
+
+      // Find the corresponding funding input from the offer to get witnessUtxo
+      const fundingInput = dlcOffer.fundingInputs[i];
+      if (fundingInput) {
+        const prevOut = fundingInput.prevTx.outputs[fundingInput.prevTxVout];
+        const witnessUtxo = {
+          script: Buffer.from(prevOut.scriptPubKey.serialize().subarray(1)),
+          value: Number(prevOut.value.sats),
+        };
+
+        fundingPsbt.addInput({
+          hash: input.hash,
+          index: input.index,
+          sequence: input.sequence,
+          witnessUtxo,
+        });
+      } else {
+        // Fallback: add input without witnessUtxo (shouldn't happen for valid DLC)
+        fundingPsbt.addInput({
+          hash: input.hash,
+          index: input.index,
+          sequence: input.sequence,
+        });
+      }
+    }
+
+    // Add all outputs from the funding transaction
+    for (let i = 0; i < fundTx.outs.length; i++) {
+      const output = fundTx.outs[i];
+      const addr = this.scriptPubKeyToAddress(output.script);
+      fundingPsbt.addOutput({
+        address: addr,
+        value: output.value,
+      });
+    }
+
+    // Set locktime
+    fundingPsbt.setLocktime(fundTx.locktime);
+
+    return fundingPsbt;
+  }
+
+  /**
+   * Create refund PSBT from raw transaction data
+   */
+  private createRefundPsbtFromRawTx(
+    dlcOffer: DlcOffer,
+    dlcAccept: DlcAccept,
+    fundTx: btTransaction,
+    refundTx: btTransaction,
+    fundTxVout: number,
+  ): Psbt {
+    const refundPsbt = new Psbt({ network: this.network });
+
+    // Create the funding script (2-of-2 multisig)
+    const fundingPubKeys =
+      Buffer.compare(dlcOffer.fundingPubkey, dlcAccept.fundingPubkey) === -1
+        ? [dlcOffer.fundingPubkey, dlcAccept.fundingPubkey]
+        : [dlcAccept.fundingPubkey, dlcOffer.fundingPubkey];
+
+    const p2ms = payments.p2ms({
+      m: 2,
+      pubkeys: fundingPubKeys,
+      network: this.network,
+    });
+
+    const paymentVariant = payments.p2wsh({
+      redeem: p2ms,
+      network: this.network,
+    });
+
+    // Get the actual funding output value
+    const actualFundingOutputValue = fundTx.outs[fundTxVout].value;
+
+    // Use the input hash from the refund transaction
+    const rawRefundInputHash = refundTx.ins[0].hash;
+    const rawRefundInputIndex = refundTx.ins[0].index;
+
+    // Add the funding input
+    refundPsbt.addInput({
+      hash: rawRefundInputHash,
+      index: rawRefundInputIndex,
+      sequence: refundTx.ins[0].sequence,
+      witnessUtxo: {
+        script: paymentVariant.output!,
+        value: actualFundingOutputValue,
+      },
+      witnessScript: paymentVariant.redeem!.output,
+    });
+
+    // Add refund outputs
+    for (let i = 0; i < refundTx.outs.length; i++) {
+      const output = refundTx.outs[i];
+      const addr = this.scriptPubKeyToAddress(output.script);
+      refundPsbt.addOutput({
+        address: addr,
+        value: output.value,
+      });
+    }
+
+    // Set locktime
+    refundPsbt.setLocktime(refundTx.locktime);
+
+    return refundPsbt;
+  }
+
+  /**
+   * Create CET PSBT from raw transaction data
+   */
+  private createCetPsbtFromRawTx(
+    dlcOffer: DlcOffer,
+    dlcAccept: DlcAccept,
+    fundTx: btTransaction,
+    cetTx: btTransaction,
+    fundTxVout: number,
+  ): Psbt {
+    const cetPsbt = new Psbt({ network: this.network });
+
+    // Create the funding script (2-of-2 multisig)
+    const fundingPubKeys =
+      Buffer.compare(dlcOffer.fundingPubkey, dlcAccept.fundingPubkey) === -1
+        ? [dlcOffer.fundingPubkey, dlcAccept.fundingPubkey]
+        : [dlcAccept.fundingPubkey, dlcOffer.fundingPubkey];
+
+    const p2ms = payments.p2ms({
+      m: 2,
+      pubkeys: fundingPubKeys,
+      network: this.network,
+    });
+
+    const paymentVariant = payments.p2wsh({
+      redeem: p2ms,
+      network: this.network,
+    });
+
+    // Get the actual funding output value
+    const actualFundingOutputValue = fundTx.outs[fundTxVout].value;
+
+    // Use the input hash from the CET transaction
+    const rawCetInputHash = cetTx.ins[0].hash;
+    const rawCetInputIndex = cetTx.ins[0].index;
+
+    // Add the funding input
+    cetPsbt.addInput({
+      hash: rawCetInputHash,
+      index: rawCetInputIndex,
+      sequence: cetTx.ins[0].sequence,
+      witnessUtxo: {
+        script: paymentVariant.output!,
+        value: actualFundingOutputValue,
+      },
+      witnessScript: paymentVariant.redeem!.output,
+    });
+
+    // Add CET outputs
+    for (let i = 0; i < cetTx.outs.length; i++) {
+      const output = cetTx.outs[i];
+      const addr = this.scriptPubKeyToAddress(output.script);
+      cetPsbt.addOutput({
+        address: addr,
+        value: output.value,
+      });
+    }
+
+    // Set locktime if present
+    if (cetTx.locktime) {
+      cetPsbt.setLocktime(cetTx.locktime);
+    }
+
+    return cetPsbt;
   }
 
   /**
@@ -996,8 +1109,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
    */
   async getAdaptorPoints(dlcOffer: DlcOffer, dlcAccept: DlcAccept): Promise<string[]> {
     try {
-      console.log('🔍 Fetching adaptor points from backend...');
-
       const response = await fetch('http://localhost:3005/api/dlc/adaptor-points', {
         method: 'POST',
         headers: {
@@ -1015,10 +1126,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       }
 
       const result = (await response.json()) as { adaptorPoints: string[]; success: boolean };
-
-      console.log(`✅ Received ${result.adaptorPoints.length} adaptor points from backend`);
-
-      console.log('Adaptor Points:', result.adaptorPoints);
 
       return result.adaptorPoints;
     } catch (error: unknown) {
@@ -1040,7 +1147,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     dlcTransactions: DlcTransactions,
   ): Psbt {
     const transaction = btTransaction.fromBuffer(dlcTransactions.refundTx.serialize());
-    // Create PSBT for refund transaction
     const refundPsbt = new Psbt({ network: this.network });
 
     // Verify refund transaction locktime matches expected
@@ -1071,27 +1177,28 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     const fundingTransaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
     const actualFundingOutputValue = fundingTransaction.outs[dlcTransactions.fundTxVout].value;
 
-    // CRITICAL: Use the input hash directly from the raw refund transaction
-    // The raw transaction already has the correct prevout hash in internal byte order
+    // Use the input hash directly from the raw refund transaction
     const rawRefundInputHash = transaction.ins[0].hash;
     const rawRefundInputIndex = transaction.ins[0].index;
 
     // Add the funding input
     refundPsbt.addInput({
-      hash: rawRefundInputHash, // Use the hash from the raw refund tx (already in correct internal byte order)
+      hash: rawRefundInputHash,
       index: rawRefundInputIndex,
       sequence: Number(dlcTransactions.refundTx.inputs[0].sequence),
       witnessUtxo: {
         script: paymentVariant.output!,
-        value: actualFundingOutputValue, // Use actual funding output value
+        value: actualFundingOutputValue,
       },
       witnessScript: paymentVariant.redeem!.output,
     });
 
     // Add refund outputs
-    for (const output of transaction.outs) {
+    for (let i = 0; i < transaction.outs.length; i++) {
+      const output = transaction.outs[i];
+      const addr = this.scriptPubKeyToAddress(output.script);
       refundPsbt.addOutput({
-        address: address.fromOutputScript(output.script, this.network),
+        address: addr,
         value: output.value,
       });
     }
@@ -1142,11 +1249,6 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       );
       const sequenceValue = originalInput ? originalInput.sequence : Number(fundingInput.sequence);
 
-      console.log(
-        `Adding input to PSBT: ${fundingInput.prevTx.txId.toString()}:${fundingInput.prevTxVout}`,
-      );
-      console.log(`  Using sequence from bitcoinjs transaction: ${sequenceValue}`);
-
       fundingPsbt.addInput({
         hash: fundingInput.prevTx.txId.toString(),
         index: fundingInput.prevTxVout,
@@ -1158,21 +1260,13 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     // Add all outputs to PSBT (maintains transaction structure) - exactly like DDK
     for (const output of transaction.outs) {
       fundingPsbt.addOutput({
-        address: address.fromOutputScript(Buffer.from(output.script), this.network),
+        address: this.scriptPubKeyToAddress(Buffer.from(output.script)),
         value: output.value,
       });
     }
 
-    // Set locktime (DDK doesn't explicitly set this, but it should match)
+    // Set locktime
     fundingPsbt.setLocktime(transaction.locktime);
-
-    console.log('🔍 PSBT Structure (DDK-compatible):');
-    console.log(`  Input count: ${fundingPsbt.data.inputs.length}`);
-
-    console.log(`  Output count: ${fundingPsbt.txOutputs.length}`);
-    fundingPsbt.txOutputs.forEach((output, i) => {
-      console.log(`  Output ${i}: ${output.value} sats, script=${output.script.toString('hex')}`);
-    });
 
     return fundingPsbt;
   }
@@ -1193,134 +1287,20 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     dlcTransactions: DlcTransactions,
     outcomeIndex: number,
   ): Promise<Buffer> {
-    // 1. Create CET PSBT using existing createCetPsbt()
+    // Create CET PSBT
     const cetPsbt = this.createCetPsbt(dlcOffer, dlcAccept, dlcTransactions, outcomeIndex);
 
-    // Get the raw CET from ddk-ts for comparison
-    const rawCet = dlcTransactions.cets[outcomeIndex];
-    const rawCetTx = btTransaction.fromBuffer(rawCet.serialize());
-
-    console.log('🔍 signCetForExecution - PSBT vs Raw CET Comparison:');
-    console.log('================== RAW CET FROM DDK ==================');
-    console.log(`  Raw CET hex: ${rawCet.serialize().toString('hex')}`);
-    console.log(`  Raw CET txid: ${rawCetTx.getId()}`);
-    console.log(`  Raw CET version: ${rawCetTx.version}`);
-    console.log(`  Raw CET locktime: ${rawCetTx.locktime}`);
-    console.log(`  Raw CET inputs: ${rawCetTx.ins.length}`);
-    rawCetTx.ins.forEach((input, i) => {
-      console.log(`    Input ${i}:`);
-      console.log(`      hash: ${input.hash.toString('hex')}`);
-      console.log(`      hash (reversed): ${Buffer.from(input.hash).reverse().toString('hex')}`);
-      console.log(`      index: ${input.index}`);
-      console.log(`      sequence: ${input.sequence}`);
-    });
-    console.log(`  Raw CET outputs: ${rawCetTx.outs.length}`);
-    rawCetTx.outs.forEach((output, i) => {
-      console.log(
-        `    Output ${i}: ${output.value} sats, script: ${output.script.toString('hex')}`,
-      );
-    });
-
-    console.log('================== PSBT TRANSACTION ==================');
-    // Extract unsigned transaction from PSBT for comparison
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
-    const psbtTx = (cetPsbt as any).__CACHE.__TX as btTransaction;
-    console.log(`  PSBT tx version: ${psbtTx.version}`);
-    console.log(`  PSBT tx locktime: ${psbtTx.locktime}`);
-    console.log(`  PSBT tx inputs: ${psbtTx.ins.length}`);
-    psbtTx.ins.forEach((input, i) => {
-      console.log(`    Input ${i}:`);
-      console.log(`      hash: ${input.hash.toString('hex')}`);
-      console.log(`      hash (reversed): ${Buffer.from(input.hash).reverse().toString('hex')}`);
-      console.log(`      index: ${input.index}`);
-      console.log(`      sequence: ${input.sequence}`);
-    });
-    console.log(`  PSBT tx outputs: ${psbtTx.outs.length}`);
-    psbtTx.outs.forEach((output, i) => {
-      console.log(
-        `    Output ${i}: ${output.value} sats, script: ${output.script.toString('hex')}`,
-      );
-    });
-
-    console.log('================== COMPARISON ==================');
-    console.log(`  Version match: ${rawCetTx.version === psbtTx.version}`);
-    console.log(`  Locktime match: ${rawCetTx.locktime === psbtTx.locktime}`);
-    console.log(`  Input count match: ${rawCetTx.ins.length === psbtTx.ins.length}`);
-    console.log(`  Output count match: ${rawCetTx.outs.length === psbtTx.outs.length}`);
-
-    // Compare input hashes
-    if (rawCetTx.ins.length > 0 && psbtTx.ins.length > 0) {
-      const rawInputHash = rawCetTx.ins[0].hash.toString('hex');
-      const psbtInputHash = psbtTx.ins[0].hash.toString('hex');
-      console.log(`  Input 0 hash match: ${rawInputHash === psbtInputHash}`);
-      if (rawInputHash !== psbtInputHash) {
-        console.log(`    RAW:  ${rawInputHash}`);
-        console.log(`    PSBT: ${psbtInputHash}`);
-      }
-      console.log(`  Input 0 index match: ${rawCetTx.ins[0].index === psbtTx.ins[0].index}`);
-      console.log(
-        `  Input 0 sequence match: ${rawCetTx.ins[0].sequence === psbtTx.ins[0].sequence}`,
-      );
-    }
-
-    // Compare outputs
-    for (let i = 0; i < Math.min(rawCetTx.outs.length, psbtTx.outs.length); i++) {
-      const rawOut = rawCetTx.outs[i];
-      const psbtOut = psbtTx.outs[i];
-      console.log(`  Output ${i} value match: ${rawOut.value === psbtOut.value}`);
-      console.log(
-        `  Output ${i} script match: ${rawOut.script.toString('hex') === psbtOut.script.toString('hex')}`,
-      );
-    }
-
-    console.log('================== PSBT INPUT DATA ==================');
-    console.log(`  PSBT inputs:`, cetPsbt.data.inputs);
-    console.log(
-      `  PSBT input 0 witnessScript:`,
-      cetPsbt.data.inputs[0]?.witnessScript?.toString('hex'),
-    );
-    console.log(`  PSBT input 0 witnessUtxo:`, cetPsbt.data.inputs[0]?.witnessUtxo);
-
-    // Compute the sighash that Fordefi should be signing (for comparison with server)
-    // For P2WSH, the sighash is computed using BIP143
-    try {
-      const inputData = cetPsbt.data.inputs[0];
-      const witnessScript = inputData.witnessScript;
-      const witnessUtxo = inputData.witnessUtxo;
-
-      if (witnessScript && witnessUtxo) {
-        // Get the underlying transaction from PSBT
-        const cetTransaction = dlcTransactions.cets[outcomeIndex];
-        const tx = btTransaction.fromBuffer(cetTransaction.serialize());
-
-        // BIP143 sighash for P2WSH
-        const sighash = tx.hashForWitnessV0(
-          0, // input index
-          witnessScript, // script code (witness script for P2WSH)
-          witnessUtxo.value, // value
-          0x01, // SIGHASH_ALL
-        );
-        console.log(`  🔍 Computed sighash (BIP143): ${sighash.toString('hex')}`);
-      }
-    } catch (e) {
-      console.log(`  Could not compute sighash for logging:`, e);
-    }
-
-    // 2. Get payment address for signing
+    // Get payment address for signing
     const paymentAddress = await this.getPaymentAddress();
 
-    console.log(`  Payment address: ${paymentAddress.address}`);
-
-    // 3. Call Fordefi signPsbt
+    // Call Fordefi signPsbt
     // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-call
     const signResponse = (await (this.wallet.request as any)('signPsbt', {
       psbt: cetPsbt.toBase64(),
       signInputs: {
-        [paymentAddress.address]: [0], // Sign input 0 (the funding output)
+        [paymentAddress.address]: [0],
       },
     })) as SatsConnectResponse<{ psbt: string }>;
-
-    console.log('🔍 signCetForExecution - Sign response:', signResponse);
 
     if (signResponse.status === 'error') {
       throw new Error(`Failed to sign CET: ${signResponse.error?.message ?? 'Unknown error'}`);
@@ -1330,41 +1310,21 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
       throw new Error('No signed PSBT in response');
     }
 
-    // 4. Extract signature from signed PSBT
+    // Extract signature from signed PSBT
     const signedPsbt = Psbt.fromBase64(signResponse.result.psbt);
     const input = signedPsbt.data.inputs[0];
-
-    console.log('🔍 signCetForExecution - Signed PSBT input:', {
-      partialSigCount: input?.partialSig?.length ?? 0,
-      hasFinalScriptWitness: !!input?.finalScriptWitness,
-    });
 
     if (!input?.partialSig || input.partialSig.length === 0) {
       throw new Error('No signature found in signed PSBT');
     }
 
     const signature = input.partialSig[0].signature;
-    const pubkey = input.partialSig[0].pubkey;
-
-    console.log('🔍 signCetForExecution - Extracted signature:');
-    console.log(`  Pubkey: ${pubkey.toString('hex')}`);
-    console.log(`  Signature: ${signature.toString('hex')} (${signature.length} bytes)`);
 
     // Return the DER signature (without sighash byte if present)
-    // PSBT partialSig should not include sighash byte, but let's strip it if it's there
     let derSig = signature;
-    if (signature.length === 71 || signature.length === 72) {
-      // Check if last byte is sighash - if signature parses as valid DER without last byte
-      // For now, assume it's pure DER from PSBT
-      derSig = signature;
-    } else if (signature.length === 72 || signature.length === 73) {
-      // Has sighash byte appended, strip it
+    if (signature.length === 72 || signature.length === 73) {
       derSig = signature.subarray(0, signature.length - 1);
     }
-
-    console.log(
-      `  DER signature (for witness): ${derSig.toString('hex')} (${derSig.length} bytes)`,
-    );
 
     return derSig;
   }
@@ -1412,45 +1372,28 @@ export class BitcoinSatsConnectProvider extends Provider implements Partial<Wall
     const fundingTransaction = btTransaction.fromBuffer(dlcTransactions.fundTx.serialize());
     const actualFundingOutputValue = fundingTransaction.outs[dlcTransactions.fundTxVout].value;
 
-    console.log(
-      'Number(cetTransaction.inputs[0].sequence)',
-      Number(cetTransaction.inputs[0].sequence),
-    );
-
-    // CRITICAL: Use the input hash directly from the raw CET transaction
-    // The raw CET already has the correct prevout hash in internal byte order
-    // Using dlcTransactions.fundTx.txId.serialize() might give us the wrong byte order
+    // Use the input hash directly from the raw CET transaction
     const rawCetInputHash = transaction.ins[0].hash;
     const rawCetInputIndex = transaction.ins[0].index;
 
-    console.log('🔍 createCetPsbt - Input hash comparison:');
-    console.log(
-      `  dlcTransactions.fundTx.txId.serialize(): ${dlcTransactions.fundTx.txId.serialize().toString('hex')}`,
-    );
-    console.log(`  Raw CET input hash (from bitcoinjs): ${rawCetInputHash.toString('hex')}`);
-    console.log(
-      `  Raw CET input hash reversed: ${Buffer.from(rawCetInputHash).reverse().toString('hex')}`,
-    );
-    console.log(`  dlcTransactions.fundTxVout: ${dlcTransactions.fundTxVout}`);
-    console.log(`  Raw CET input index: ${rawCetInputIndex}`);
-
-    // Add the funding input (CETs spend from the same funding transaction as refund)
-    // Use the hash directly from the raw CET to ensure byte order is correct
+    // Add the funding input
     cetPsbt.addInput({
-      hash: rawCetInputHash, // Use the hash from the raw CET (already in correct internal byte order)
+      hash: rawCetInputHash,
       index: rawCetInputIndex,
       sequence: Number(cetTransaction.inputs[0].sequence),
       witnessUtxo: {
         script: paymentVariant.output!,
-        value: actualFundingOutputValue, // Use actual funding output value
+        value: actualFundingOutputValue,
       },
       witnessScript: paymentVariant.redeem!.output,
     });
 
     // Add CET outputs
-    for (const output of transaction.outs) {
+    for (let i = 0; i < transaction.outs.length; i++) {
+      const output = transaction.outs[i];
+      const addr = this.scriptPubKeyToAddress(output.script);
       cetPsbt.addOutput({
-        address: address.fromOutputScript(output.script, this.network),
+        address: addr,
         value: output.value,
       });
     }
